@@ -27,6 +27,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	cio "github.com/containerd/containerd/v2/internal/cri/io"
@@ -341,6 +342,41 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	sOpts, err := snapshotterOpts(r.containerConfig)
 	if err != nil {
 		return "", err
+	}
+
+	// Check if shared snapshot path is configured and add custom labels if so.
+	// Assumes c.config.SharedSnapshotPath is a new field in criconfig.Config
+	// and label constants like crilabels.LabelK8sNamespace are defined and accessible.
+	if c.config.SharedSnapshotPath != "" {
+		podSandboxMeta := r.podSandboxConfig.GetMetadata()
+		containerMeta := r.containerConfig.GetMetadata()
+
+		if podSandboxMeta != nil && containerMeta != nil {
+			kubeNamespace := podSandboxMeta.GetNamespace()
+			podName := podSandboxMeta.GetName()
+			// r.containerName is already available in createContainerRequest struct
+
+			if kubeNamespace != "" && podName != "" && r.containerName != "" {
+				customLabels := make(map[string]string)
+				// These crilabels constants would need to be defined, e.g., in internal/cri/labels/labels.go
+				// and use the "com.tecorigin.snapshotter/" prefix.
+				customLabels[crilabels.LabelK8sNamespace] = kubeNamespace
+				customLabels[crilabels.LabelK8sPodName] = podName
+				customLabels[crilabels.LabelK8sContainerName] = r.containerName
+				customLabels[crilabels.LabelSharedDiskPath] = c.config.SharedSnapshotPath
+				customLabels[crilabels.LabelUseSharedStorage] = "true"
+
+				labelOpt := snapshots.WithLabels(customLabels)
+				sOpts = append(sOpts, labelOpt)
+				log.G(r.ctx).Infof("Applying custom snapshot labels for container %s in pod %s/%s to use shared path: %s",
+					r.containerName, kubeNamespace, podName, c.config.SharedSnapshotPath)
+			} else {
+				log.G(r.ctx).Warnf("Missing metadata for custom snapshot labels (ns: %q, pod: %q, container: %q), skipping shared snapshot for %s.",
+					kubeNamespace, podName, r.containerName, r.containerID)
+			}
+		} else {
+			log.G(r.ctx).Warnf("PodSandbox metadata or container metadata is nil, skipping custom snapshot labels for %s.", r.containerID)
+		}
 	}
 
 	// Set snapshotter before any other options.

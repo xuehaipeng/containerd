@@ -448,6 +448,10 @@ type Config struct {
 	RootDir string `json:"rootDir"`
 	// StateDir is the root directory path for managing volatile pod/container data
 	StateDir string `json:"stateDir"`
+
+	// SharedSnapshotPath is the base path on shared storage for custom snapshot upperdirs.
+	// If empty, the custom shared snapshot feature is disabled.
+	SharedSnapshotPath string `toml:"shared_snapshot_path" json:"sharedSnapshotPath"`
 }
 
 // ServerConfig contains all the configuration for the CRI API server.
