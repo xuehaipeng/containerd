@@ -32,6 +32,7 @@ import (
 	"github.com/containerd/containerd/v2/internal/userns"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 )
 
@@ -39,6 +40,20 @@ import (
 // This optional label of a snapshot contains the location of "upperdir" where
 // the change set between this snapshot and its parent is stored.
 const upperdirKey = "containerd.io/snapshot/overlay.upperdir"
+
+// CUSTOM SNAPSHOTTER LABELS
+const (
+	// LabelK8sNamespace informs the snapshotter about the K8s namespace.
+	LabelK8sNamespace = "com.tecorigin.snapshotter/k8s-namespace"
+	// LabelK8sPodName informs the snapshotter about the K8s pod name.
+	LabelK8sPodName = "com.tecorigin.snapshotter/k8s-pod-name"
+	// LabelK8sContainerName informs the snapshotter about the K8s container name.
+	LabelK8sContainerName = "com.tecorigin.snapshotter/k8s-container-name"
+	// LabelSharedDiskPath specifies the base path on shared storage.
+	LabelSharedDiskPath = "com.tecorigin.snapshotter/shared-disk-path"
+	// LabelUseSharedStorage is a marker to activate this custom logic.
+	LabelUseSharedStorage = "com.tecorigin.snapshotter/use-shared-storage" // Value "true"
+)
 
 // SnapshotterConfig is used to configure the overlay snapshotter instance
 type SnapshotterConfig struct {
@@ -103,6 +118,37 @@ func WithRemapIDs(config *SnapshotterConfig) error {
 func WithSlowChown(config *SnapshotterConfig) error {
 	config.slowChown = true
 	return nil
+}
+
+// isSharedSnapshot checks labels to see if this snapshot should use shared storage.
+func isSharedSnapshot(info snapshots.Info) bool {
+	if info.Labels == nil {
+		return false
+	}
+	return info.Labels[LabelUseSharedStorage] == "true"
+}
+
+// getSharedPathBase constructs the base directory on shared storage for a given snapshot.
+// It requires the snapshot ID for uniqueness.
+func getSharedPathBase(info snapshots.Info, id string) (string, error) {
+	if info.Labels == nil {
+		return "", fmt.Errorf("missing labels for shared storage path construction")
+	}
+
+	sharedDiskPath, okS := info.Labels[LabelSharedDiskPath]
+	kubeNamespace, okN := info.Labels[LabelK8sNamespace]
+	podName, okP := info.Labels[LabelK8sPodName]
+	containerName, okC := info.Labels[LabelK8sContainerName]
+
+	if !okS || !okN || !okP || !okC {
+		return "", fmt.Errorf("missing one or more required labels for shared storage path (sharedPath, namespace, podName, containerName)")
+	}
+	if id == "" {
+		return "", fmt.Errorf("snapshot ID is required for shared storage path")
+	}
+
+	// Path: /<shared_disk_path>/<kubernetes_namespace>/<pod_name>/<container_name>/<snapshot_id>
+	return filepath.Join(sharedDiskPath, kubeNamespace, podName, containerName, id), nil
 }
 
 type snapshotter struct {
@@ -197,14 +243,19 @@ func (o *snapshotter) Stat(ctx context.Context, key string) (info snapshots.Info
 		id, info, _, err = storage.GetInfo(ctx, key)
 		return err
 	}); err != nil {
-		return info, err
+		return snapshots.Info{}, err
 	}
 
 	if o.upperdirLabel {
 		if info.Labels == nil {
 			info.Labels = make(map[string]string)
 		}
-		info.Labels[upperdirKey] = o.upperPath(id)
+		upperPathValue, pathErr := o.determineUpperPath(id, info)
+		if pathErr != nil {
+			log.G(ctx).WithError(pathErr).Warnf("Failed to determine upper path for stat label on %s, using default", id)
+			upperPathValue = filepath.Join(o.root, "snapshots", id, "fs")
+		}
+		info.Labels[upperdirKey] = upperPathValue
 	}
 	return info, nil
 }
@@ -217,14 +268,20 @@ func (o *snapshotter) Update(ctx context.Context, info snapshots.Info, fieldpath
 		}
 
 		if o.upperdirLabel {
-			id, _, _, err := storage.GetInfo(ctx, newInfo.Name)
-			if err != nil {
-				return err
+			id, _, _, errGet := storage.GetInfo(ctx, newInfo.Name)
+			if errGet != nil {
+				log.G(ctx).WithError(errGet).Warnf("Failed to get ID for updated snapshot info %s during label update", newInfo.Name)
+			} else {
+				if newInfo.Labels == nil {
+					newInfo.Labels = make(map[string]string)
+				}
+				upperPathValue, pathErr := o.determineUpperPath(id, newInfo)
+				if pathErr != nil {
+					log.G(ctx).WithError(pathErr).Warnf("Failed to determine upper path for update label on %s, using default", id)
+					upperPathValue = filepath.Join(o.root, "snapshots", id, "fs")
+				}
+				newInfo.Labels[upperdirKey] = upperPathValue
 			}
-			if newInfo.Labels == nil {
-				newInfo.Labels = make(map[string]string)
-			}
-			newInfo.Labels[upperdirKey] = o.upperPath(id)
 		}
 		return nil
 	})
@@ -247,12 +304,16 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (_ snapshots.Usage,
 		id, info, usage, err = storage.GetInfo(ctx, key)
 		return err
 	}); err != nil {
-		return usage, err
+		return snapshots.Usage{}, err
 	}
 
 	if info.Kind == snapshots.KindActive {
-		upperPath := o.upperPath(id)
-		du, err := fs.DiskUsage(ctx, upperPath)
+		activeUpperPath, pathErr := o.determineUpperPath(id, info)
+		if pathErr != nil {
+			return snapshots.Usage{}, fmt.Errorf("failed to determine upper path for usage calculation on %s: %w", id, pathErr)
+		}
+
+		du, err := fs.DiskUsage(ctx, activeUpperPath)
 		if err != nil {
 			// TODO(stevvooe): Consider not reporting an error in this case.
 			return snapshots.Usage{}, err
@@ -296,13 +357,17 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 
 func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
 	return o.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
-		// grab the existing id
-		id, _, _, err := storage.GetInfo(ctx, key)
+		// grab the existing id and info
+		id, currentInfo, _, err := storage.GetInfo(ctx, key)
 		if err != nil {
 			return err
 		}
 
-		usage, err := fs.DiskUsage(ctx, o.upperPath(id))
+		activeUpperPath, pathErr := o.determineUpperPath(id, currentInfo)
+		if pathErr != nil {
+			return fmt.Errorf("failed to determine upper path for commit on %s: %w", id, pathErr)
+		}
+		usage, err := fs.DiskUsage(ctx, activeUpperPath)
 		if err != nil {
 			return err
 		}
@@ -318,33 +383,78 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 // immediately become unavailable and unrecoverable. Disk space will
 // be freed up on the next call to `Cleanup`.
 func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
-	var removals []string
-	// Remove directories after the transaction is closed, failures must not
-	// return error since the transaction is committed with the removal
-	// key no longer available.
-	defer func() {
-		if err == nil {
-			for _, dir := range removals {
-				if err := os.RemoveAll(dir); err != nil {
-					log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
-				}
-			}
+	var (
+		id                 string
+		info               snapshots.Info
+		isDirectoryShared  bool
+		sharedPathToRemove string
+	)
+
+	// First, get info to determine if it's a shared snapshot
+	// Use a non-transactional read for GetInfo first.
+	if errPreInfo := o.ms.WithTransaction(ctx, false, func(ctxContext context.Context) error {
+		var getErr error
+		id, info, _, getErr = storage.GetInfo(ctxContext, key)
+		return getErr
+	}); errPreInfo != nil {
+		if !errdefs.IsNotFound(errPreInfo) { // If not "not found", it's a real error
+			return fmt.Errorf("failed to get snapshot info for removal of %s: %w", key, errPreInfo)
 		}
-	}()
-	return o.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
-		_, _, err = storage.Remove(ctx, key)
-		if err != nil {
-			return fmt.Errorf("failed to remove snapshot %s: %w", key, err)
+		log.G(ctx).WithError(errPreInfo).Warnf("Snapshot %s not found during pre-removal info fetch, proceeding with metadata removal if any", key)
+		id = "" // Ensure no shared path is derived if info fetch fails with NotFound
+	}
+
+	if id != "" && isSharedSnapshot(info) {
+		base, pathErr := getSharedPathBase(info, id)
+		if pathErr == nil {
+			isDirectoryShared = true
+			sharedPathToRemove = base // The whole base dir: /.../<snapshot_id>
+		} else {
+			log.G(ctx).WithError(pathErr).Warnf("Failed to determine shared path for removal of snapshot %s, shared data may be orphaned", id)
+		}
+	}
+
+	// Now, the main transaction to remove from metastore
+	var localDirectoriesToRemove []string
+	if err = o.ms.WithTransaction(ctx, true, func(ctxContext context.Context) error {
+		// Re-fetch ID and info inside transaction to ensure consistency if Remove is slow
+		// and something else happens, though storage.Remove should be atomic on 'key'.
+		// For simplicity, we use the 'id' and 'info' from outside if they were good.
+		// If 'id' was empty (due to initial NotFound), storage.Remove will also likely fail NotFound, which is fine.
+		currentIDForMetaRemove, _, metaErr := storage.Remove(ctxContext, key) // Remove from metadata
+		if metaErr != nil {
+			return fmt.Errorf("failed to remove snapshot %s from metastore: %w", key, metaErr)
+		}
+		if id == "" { // If initial GetInfo failed NotFound, use ID from Remove
+			id = currentIDForMetaRemove
 		}
 
 		if !o.asyncRemove {
-			removals, err = o.getCleanupDirectories(ctx)
+			localDirectoriesToRemove, err = o.getCleanupDirectories(ctxContext)
 			if err != nil {
-				return fmt.Errorf("unable to get directories for removal: %w", err)
+				return fmt.Errorf("unable to get local directories for removal: %w", err)
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err // Metastore transaction failed
+	}
+
+	// Actual removal outside transaction
+	// Remove local directories first
+	for _, dir := range localDirectoriesToRemove {
+		if errR := os.RemoveAll(dir); errR != nil {
+			log.G(ctx).WithError(errR).WithField("path", dir).Warn("failed to remove local directory")
+		}
+	}
+	// Then remove shared directory if applicable
+	if isDirectoryShared && sharedPathToRemove != "" {
+		log.G(ctx).Infof("Removing shared snapshot data at %s", sharedPathToRemove)
+		if errR := os.RemoveAll(sharedPathToRemove); errR != nil {
+			log.G(ctx).WithError(errR).WithField("path", sharedPathToRemove).Warn("failed to remove shared directory")
+		}
+	}
+	return nil
 }
 
 // Walk the snapshots.
@@ -352,15 +462,27 @@ func (o *snapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, fs ...str
 	return o.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		if o.upperdirLabel {
 			return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
-				id, _, _, err := storage.GetInfo(ctx, info.Name)
-				if err != nil {
-					return err
+				// We need the ID to determine the correct upperPath for the label.
+				// storage.WalkInfo provides info.Name, which is the key. We need the internal ID.
+				// This requires another GetInfo call per walked item if ID is not on info directly.
+				// Or, storage.WalkInfo should provide the ID if it's readily available.
+				// For now, let's assume info.Name can be used to get the full Info object including ID.
+				idForLabel, walkedInfo, _, errGet := storage.GetInfo(ctx, info.Name)
+				if errGet != nil {
+					log.G(ctx).WithError(errGet).Warnf("Failed to get full info for %s during Walk for label, skipping label", info.Name)
+					return fn(ctx, info) // Call with original info, label might be missing/stale
 				}
-				if info.Labels == nil {
-					info.Labels = make(map[string]string)
+
+				if walkedInfo.Labels == nil {
+					walkedInfo.Labels = make(map[string]string)
 				}
-				info.Labels[upperdirKey] = o.upperPath(id)
-				return fn(ctx, info)
+				upperPathValue, pathErr := o.determineUpperPath(idForLabel, walkedInfo)
+				if pathErr != nil {
+					log.G(ctx).WithError(pathErr).Warnf("Failed to determine upper path for walk label on %s, using default", idForLabel)
+					upperPathValue = filepath.Join(o.root, "snapshots", idForLabel, "fs") // Fallback
+				}
+				walkedInfo.Labels[upperdirKey] = upperPathValue
+				return fn(ctx, walkedInfo) // Call with potentially modified info
 			}, fs...)
 		}
 		return storage.WalkInfo(ctx, fn, fs...)
@@ -427,54 +549,42 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 
 func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
 	var (
-		s        storage.Snapshot
-		td, path string
-		info     snapshots.Info
+		s                      storage.Snapshot
+		info                   snapshots.Info
+		localSnapshotTempDir   string
+		localSnapshotFinalPath string // For local case
 	)
 
 	defer func() {
 		if err != nil {
-			if td != "" {
-				if err1 := os.RemoveAll(td); err1 != nil {
-					log.G(ctx).WithError(err1).Warn("failed to cleanup temp snapshot directory")
+			if localSnapshotTempDir != "" { // only if it was created and not renamed/handled
+				if err1 := os.RemoveAll(localSnapshotTempDir); err1 != nil {
+					log.G(ctx).WithError(err1).Warn("failed to cleanup local temp snapshot directory")
 				}
 			}
-			if path != "" {
-				if err1 := os.RemoveAll(path); err1 != nil {
-					log.G(ctx).WithError(err1).WithField("path", path).Error("failed to reclaim snapshot directory, directory may need removal")
-					err = fmt.Errorf("failed to remove path: %v: %w", err1, err)
-				}
-			}
+			// NOTE: If shared directory creation fails mid-way, an explicit cleanup
+			// of partially created shared directories would be needed here or inside the transaction.
+			// The current structure relies on MkdirAll and then removing the base on error later.
 		}
 	}()
 
 	if err := o.ms.WithTransaction(ctx, true, func(ctx context.Context) (err error) {
-		snapshotDir := filepath.Join(o.root, "snapshots")
-		td, err = o.prepareDirectory(ctx, snapshotDir, kind)
-		if err != nil {
-			return fmt.Errorf("failed to create prepare snapshot dir: %w", err)
-		}
-
 		s, err = storage.CreateSnapshot(ctx, kind, key, parent, opts...)
 		if err != nil {
-			return fmt.Errorf("failed to create snapshot: %w", err)
+			return fmt.Errorf("failed to create snapshot metadata: %w", err)
 		}
 
 		_, info, _, err = storage.GetInfo(ctx, key)
 		if err != nil {
-			return fmt.Errorf("failed to get snapshot info: %w", err)
+			return fmt.Errorf("failed to get snapshot info after creation: %w", err)
 		}
 
+		// Determine mapped UID/GID for chown, common for both local and shared
 		var (
 			mappedUID, mappedGID     = -1, -1
 			uidmapLabel, gidmapLabel string
 			needsRemap               = false
 		)
-		// NOTE: if idmapped mounts' supported by hosted kernel there may be
-		// no parents at all, so overlayfs will not work and snapshotter
-		// will use bind mount. To be able to create file objects inside the
-		// rootfs -- just chown this only bound directory according to provided
-		// {uid,gid}map. In case of one/multiple parents -- chown upperdir.
 		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
 			uidmapLabel = v
 			needsRemap = true
@@ -483,47 +593,99 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			gidmapLabel = v
 			needsRemap = true
 		}
-
 		if needsRemap {
 			var idMap userns.IDMap
 			if err = idMap.Unmarshal(uidmapLabel, gidmapLabel); err != nil {
 				return fmt.Errorf("failed to unmarshal snapshot ID mapped labels: %w", err)
 			}
-			root, err := idMap.RootPair()
+			rootPair, err := idMap.RootPair()
 			if err != nil {
 				return fmt.Errorf("failed to find root pair: %w", err)
 			}
-			mappedUID, mappedGID = int(root.Uid), int(root.Gid)
+			mappedUID, mappedGID = int(rootPair.Uid), int(rootPair.Gid)
 		}
-
-		if mappedUID == -1 || mappedGID == -1 {
-			if len(s.ParentIDs) > 0 {
-				st, err := os.Stat(o.upperPath(s.ParentIDs[0]))
-				if err != nil {
-					return fmt.Errorf("failed to stat parent: %w", err)
-				}
-				stat, ok := st.Sys().(*syscall.Stat_t)
-				if !ok {
-					return fmt.Errorf("incompatible types after stat call: *syscall.Stat_t expected")
-				}
+		// Fallback to parent's UID/GID if not explicitly mapped and has parents
+		if (mappedUID == -1 || mappedGID == -1) && len(s.ParentIDs) > 0 {
+			// Stat parent's upper to get its ownership. Assumes parent is local.
+			// If parent could also be shared, this stat path needs to be determined correctly.
+			// For now, assume parent is local via o.root.
+			parentUpperForStat := filepath.Join(o.root, "snapshots", s.ParentIDs[0], "fs")
+			st, statErr := os.Stat(parentUpperForStat)
+			if statErr != nil {
+				return fmt.Errorf("failed to stat parent %s for UID/GID: %w", s.ParentIDs[0], statErr)
+			}
+			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
 				mappedUID = int(stat.Uid)
 				mappedGID = int(stat.Gid)
+			} else {
+				return fmt.Errorf("incompatible types after stat call on parent: *syscall.Stat_t expected")
 			}
 		}
 
-		if mappedUID != -1 && mappedGID != -1 {
-			if err := os.Lchown(filepath.Join(td, "fs"), mappedUID, mappedGID); err != nil {
-				return fmt.Errorf("failed to chown: %w", err)
+		if isSharedSnapshot(info) && kind == snapshots.KindActive {
+			sharedBase, pathErr := getSharedPathBase(info, s.ID)
+			if pathErr != nil {
+				return fmt.Errorf("cannot determine shared path for snapshot %s: %w", s.ID, pathErr)
 			}
-		}
 
-		path = filepath.Join(snapshotDir, s.ID)
-		if err = os.Rename(td, path); err != nil {
-			return fmt.Errorf("failed to rename: %w", err)
-		}
-		td = ""
+			targetUpperPath := filepath.Join(sharedBase, "fs")
+			targetWorkPath := filepath.Join(sharedBase, "work")
 
-		return nil
+			if err = os.MkdirAll(targetUpperPath, 0755); err != nil {
+				return fmt.Errorf("failed to create shared upperdir %s: %w", targetUpperPath, err)
+			}
+			// Defer cleanup of shared upper if work creation fails
+			defer func() {
+				if err != nil { // if an error occurred later in the transaction or during work dir creation
+					os.RemoveAll(targetUpperPath)
+				}
+			}()
+			if err = os.MkdirAll(targetWorkPath, 0711); err != nil {
+				return fmt.Errorf("failed to create shared workdir %s: %w", targetWorkPath, err)
+			}
+			// Defer cleanup of shared work if something else fails
+			defer func() {
+				if err != nil {
+					os.RemoveAll(targetWorkPath)
+				}
+			}()
+
+			log.G(ctx).Debugf("Created shared upperdir at %s and workdir at %s", targetUpperPath, targetWorkPath)
+
+			if mappedUID != -1 && mappedGID != -1 {
+				if err = os.Lchown(targetUpperPath, mappedUID, mappedGID); err != nil {
+					return fmt.Errorf("failed to chown shared upperdir %s: %w", targetUpperPath, err)
+				}
+			}
+			// Ensure local snapshot ID marker directory exists
+			ensureLocalSnapshotIDDir := filepath.Join(o.root, "snapshots", s.ID)
+			if _, errStat := os.Stat(ensureLocalSnapshotIDDir); os.IsNotExist(errStat) {
+				if errMk := os.Mkdir(ensureLocalSnapshotIDDir, 0700); errMk != nil {
+					log.G(ctx).WithError(errMk).Warnf("Failed to create local marker directory for shared snapshot %s", s.ID)
+				}
+			}
+		} else { // Local snapshot logic (or KindView which is always local-like)
+			localSnapshotsRootDir := filepath.Join(o.root, "snapshots")
+			localSnapshotTempDir, err = o.prepareDirectory(ctx, localSnapshotsRootDir, kind)
+			if err != nil {
+				return fmt.Errorf("failed to create prepare local snapshot dir: %w", err)
+			}
+			// Chown the 'fs' subdir of the temporary local directory
+			if mappedUID != -1 && mappedGID != -1 {
+				if err = os.Lchown(filepath.Join(localSnapshotTempDir, "fs"), mappedUID, mappedGID); err != nil {
+					// localSnapshotTempDir will be cleaned by the outer defer if this fails
+					return fmt.Errorf("failed to chown local temp snapshot: %w", err)
+				}
+			}
+
+			localSnapshotFinalPath = filepath.Join(localSnapshotsRootDir, s.ID)
+			if err = os.Rename(localSnapshotTempDir, localSnapshotFinalPath); err != nil {
+				// localSnapshotTempDir will be cleaned by the outer defer
+				return fmt.Errorf("failed to rename local snapshot dir from %s to %s: %w", localSnapshotTempDir, localSnapshotFinalPath, err)
+			}
+			localSnapshotTempDir = "" // Mark as successfully renamed
+		}
+		return nil // Transaction successful
 	}); err != nil {
 		return nil, err
 	}
@@ -561,16 +723,20 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 		}
 	}
 
+	actualUpperPath, upperErr := o.determineUpperPath(s.ID, info)
+	if upperErr != nil {
+		log.L.WithError(upperErr).Errorf("Failed to determine upper path for snapshot %s, attempting fallback to local", s.ID)
+		actualUpperPath = filepath.Join(o.root, "snapshots", s.ID, "fs") // Fallback
+	}
+
 	if len(s.ParentIDs) == 0 {
-		// if we only have one layer/no parents then just return a bind mount as overlay
-		// will not work
 		roFlag := "rw"
 		if s.Kind == snapshots.KindView {
 			roFlag = "ro"
 		}
 		return []mount.Mount{
 			{
-				Source: o.upperPath(s.ID),
+				Source: actualUpperPath,
 				Type:   "bind",
 				Options: append(options,
 					roFlag,
@@ -581,14 +747,23 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 	}
 
 	if s.Kind == snapshots.KindActive {
+		actualWorkPath, workErr := o.determineWorkPath(s.ID, info)
+		if workErr != nil {
+			log.L.WithError(workErr).Errorf("Failed to determine work path for snapshot %s, attempting fallback to local", s.ID)
+			actualWorkPath = filepath.Join(o.root, "snapshots", s.ID, "work") // Fallback
+		}
 		options = append(options,
-			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
-			fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
+			fmt.Sprintf("workdir=%s", actualWorkPath),
+			fmt.Sprintf("upperdir=%s", actualUpperPath),
 		)
-	} else if len(s.ParentIDs) == 1 {
+	} else if len(s.ParentIDs) == 1 && s.Kind == snapshots.KindView {
+		// View of a single committed layer. Assume parent is local.
+		// determineUpperPath for parent (if it had no special labels) would return local path.
+		// To be fully robust, we'd need parentInfo here. For now, assume parent is local.
+		parentUpperPath := filepath.Join(o.root, "snapshots", s.ParentIDs[0], "fs")
 		return []mount.Mount{
 			{
-				Source: o.upperPath(s.ParentIDs[0]),
+				Source: parentUpperPath,
 				Type:   "bind",
 				Options: append(options,
 					"ro",
@@ -600,7 +775,9 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 
 	parentPaths := make([]string, len(s.ParentIDs))
 	for i := range s.ParentIDs {
-		parentPaths[i] = o.upperPath(s.ParentIDs[i])
+		// Assuming parents are always local style snapshots.
+		// Their "fs" directory is their upper data.
+		parentPaths[i] = filepath.Join(o.root, "snapshots", s.ParentIDs[i], "fs")
 	}
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(parentPaths, ":")))
 	options = append(options, o.options...)
@@ -614,10 +791,46 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 	}
 }
 
+// determineUpperPath resolves the correct upper directory path.
+func (o *snapshotter) determineUpperPath(id string, info snapshots.Info) (string, error) {
+	if isSharedSnapshot(info) {
+		// For KindActive, this is the RW layer.
+		// For KindCommitted or KindView, if it *was* a shared snapshot, its 'fs' is on shared storage.
+		base, err := getSharedPathBase(info, id)
+		if err != nil {
+			return "", fmt.Errorf("failed to get shared path base for upperdir of snapshot %s: %w", id, err)
+		}
+		return filepath.Join(base, "fs"), nil
+	}
+	// Default local path for non-shared snapshots or if determination fails
+	return filepath.Join(o.root, "snapshots", id, "fs"), nil
+}
+
+// determineWorkPath resolves the correct work directory path.
+// Workdir is only relevant for KindActive.
+func (o *snapshotter) determineWorkPath(id string, info snapshots.Info) (string, error) {
+	if isSharedSnapshot(info) { // and info.Kind == snapshots.KindActive implicitly by usage context
+		base, err := getSharedPathBase(info, id)
+		if err != nil {
+			return "", fmt.Errorf("failed to get shared path base for workdir of snapshot %s: %w", id, err)
+		}
+		return filepath.Join(base, "work"), nil
+	}
+	// Default local path
+	return filepath.Join(o.root, "snapshots", id, "work"), nil
+}
+
+// upperPath is the original simple version, might be used by older parts or for non-Info contexts.
+// It should ideally be deprecated or made internal if all call sites can use determineUpperPath.
+// For now, it represents the default local path.
 func (o *snapshotter) upperPath(id string) string {
+	// This function is now ambiguous if a snapshot *could* be shared.
+	// It should ideally not be called directly if info is available.
+	// Defaulting to local, assuming it's called for a parent or context where info isn't known.
 	return filepath.Join(o.root, "snapshots", id, "fs")
 }
 
+// workPath is the original simple version. Similar ambiguity.
 func (o *snapshotter) workPath(id string) string {
 	return filepath.Join(o.root, "snapshots", id, "work")
 }
