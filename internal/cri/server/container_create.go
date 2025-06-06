@@ -43,6 +43,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/containerd/typeurl/v2"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/opencontainers/image-spec/identity"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -281,7 +282,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	}
 
 	var volumeMounts []*runtime.Mount
-	if !c.config.IgnoreImageDefinedVolumes {
+	if !c.config.RuntimeConfig.IgnoreImageDefinedVolumes {
 		// create a list of image volume mounts from the image spec that are not also already in the runtime config volume list
 		volumeMounts = c.volumeMounts(platform, containerRootDir, r.containerConfig, r.imageConfig)
 	} else if len(r.imageConfig.Volumes) != 0 {
@@ -344,51 +345,71 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 		return "", err
 	}
 
-	// Check if shared snapshot path is configured and add custom labels if so.
-	// Assumes c.config.SharedSnapshotPath is a new field in criconfig.Config
-	// and label constants like crilabels.LabelK8sNamespace are defined and accessible.
-	if c.config.SharedSnapshotPath != "" {
-		podSandboxMeta := r.podSandboxConfig.GetMetadata()
-		containerMeta := r.containerConfig.GetMetadata()
-
-		if podSandboxMeta != nil && containerMeta != nil {
-			kubeNamespace := podSandboxMeta.GetNamespace()
-			podName := podSandboxMeta.GetName()
-			// r.containerName is already available in createContainerRequest struct
-
-			if kubeNamespace != "" && podName != "" && r.containerName != "" {
-				customLabels := make(map[string]string)
-				// These crilabels constants would need to be defined, e.g., in internal/cri/labels/labels.go
-				// and use the "com.tecorigin.snapshotter/" prefix.
-				customLabels[crilabels.LabelK8sNamespace] = kubeNamespace
-				customLabels[crilabels.LabelK8sPodName] = podName
-				customLabels[crilabels.LabelK8sContainerName] = r.containerName
-				customLabels[crilabels.LabelSharedDiskPath] = c.config.SharedSnapshotPath
-				customLabels[crilabels.LabelUseSharedStorage] = "true"
-
-				labelOpt := snapshots.WithLabels(customLabels)
-				sOpts = append(sOpts, labelOpt)
-				log.G(r.ctx).Infof("Applying custom snapshot labels for container %s in pod %s/%s to use shared path: %s",
-					r.containerName, kubeNamespace, podName, c.config.SharedSnapshotPath)
-			} else {
-				log.G(r.ctx).Warnf("Missing metadata for custom snapshot labels (ns: %q, pod: %q, container: %q), skipping shared snapshot for %s.",
-					kubeNamespace, podName, r.containerName, r.containerID)
-			}
-		} else {
-			log.G(r.ctx).Warnf("PodSandbox metadata or container metadata is nil, skipping custom snapshot labels for %s.", r.containerID)
-		}
-	}
-
 	// Set snapshotter before any other options.
 	opts := []containerd.NewContainerOpts{
 		containerd.WithSnapshotter(c.RuntimeSnapshotter(r.ctx, ociRuntime)),
-		// Prepare container rootfs. This is always writeable even if
-		// the container wants a readonly rootfs since we want to give
-		// the runtime (runc) a chance to modify (e.g. to create mount
-		// points corresponding to spec.Mounts) before making the
-		// rootfs readonly (requested by spec.Root.Readonly).
-		customopts.WithNewSnapshot(r.containerID, *r.containerdImage, sOpts...),
 	}
+
+	// Manually prepare the snapshot to ensure labels are applied correctly from the start.
+	snapshotterName := c.RuntimeSnapshotter(r.ctx, ociRuntime)
+	snapshotter := c.client.SnapshotService(snapshotterName)
+	var parent string
+	// Get the image's snapshot ID as the parent for the container's snapshot.
+	// This requires ensuring the image is unpacked first.
+	if r.containerdImage != nil {
+		unpacked, err := (*r.containerdImage).IsUnpacked(r.ctx, snapshotterName)
+		if err != nil {
+			return "", fmt.Errorf("failed to check if image is unpacked: %w", err)
+		}
+		if !unpacked {
+			log.G(r.ctx).Infof("Image %s is not unpacked for snapshotter %s, unpacking now.", (*r.containerdImage).Name(), snapshotterName)
+			if err := (*r.containerdImage).Unpack(r.ctx, snapshotterName); err != nil {
+				return "", fmt.Errorf("failed to unpack image: %w", err)
+			}
+		}
+		diffIDs, err := (*r.containerdImage).RootFS(r.ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get rootfs diffs: %w", err)
+		}
+		parent = identity.ChainID(diffIDs).String()
+	}
+
+	if c.config.RuntimeConfig.SharedSnapshotPath != "" {
+		podSandboxMeta := r.podSandboxConfig.GetMetadata()
+		containerMeta := r.containerConfig.GetMetadata()
+		log.G(r.ctx).Debugf("SharedSnapshotPath is configured: %s", c.config.RuntimeConfig.SharedSnapshotPath)
+		if podSandboxMeta != nil && containerMeta != nil {
+			kubeNamespace := podSandboxMeta.GetNamespace()
+			podName := podSandboxMeta.GetName()
+			log.G(r.ctx).Debugf("Pod metadata: namespace=%s, name=%s, containerName=%s", kubeNamespace, podName, r.containerName)
+			if kubeNamespace != "" && podName != "" && r.containerName != "" {
+				customLabels := make(map[string]string)
+				customLabels[crilabels.LabelK8sNamespace] = kubeNamespace
+				customLabels[crilabels.LabelK8sPodName] = podName
+				customLabels[crilabels.LabelK8sContainerName] = r.containerName
+				customLabels[crilabels.LabelSharedDiskPath] = c.config.RuntimeConfig.SharedSnapshotPath
+				customLabels[crilabels.LabelUseSharedStorage] = "true"
+				sOpts = append(sOpts, snapshots.WithLabels(customLabels))
+				log.G(r.ctx).Infof("Preparing snapshot for container %s with custom shared storage labels: %+v", r.containerID, customLabels)
+			} else {
+				log.G(r.ctx).Warnf("Missing required metadata for shared storage: namespace=%s, pod=%s, container=%s", kubeNamespace, podName, r.containerName)
+			}
+		} else {
+			log.G(r.ctx).Warnf("Pod or container metadata is nil")
+		}
+	}
+
+	// Note: snapshotter.Prepare is implicitly called by WithNewSnapshot,
+	// but direct invocation is needed here to ensure options are respected
+	// before any directory creation logic in the snapshotter is triggered.
+	if _, err := snapshotter.Prepare(r.ctx, r.containerID, parent, sOpts...); err != nil {
+		return "", fmt.Errorf("failed to prepare snapshot with custom opts: %w", err)
+	}
+
+	// The snapshot is now prepared. We add it to the container options
+	// using its key, which is the container ID.
+	opts = append(opts, containerd.WithSnapshot(r.containerID))
+
 	if len(volumeMounts) > 0 {
 		mountMap := make(map[string]string)
 		for _, v := range volumeMounts {

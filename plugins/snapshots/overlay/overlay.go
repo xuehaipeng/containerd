@@ -44,15 +44,15 @@ const upperdirKey = "containerd.io/snapshot/overlay.upperdir"
 // CUSTOM SNAPSHOTTER LABELS
 const (
 	// LabelK8sNamespace informs the snapshotter about the K8s namespace.
-	LabelK8sNamespace = "com.tecorigin.snapshotter/k8s-namespace"
+	LabelK8sNamespace = "containerd.io/snapshot/k8s-namespace"
 	// LabelK8sPodName informs the snapshotter about the K8s pod name.
-	LabelK8sPodName = "com.tecorigin.snapshotter/k8s-pod-name"
+	LabelK8sPodName = "containerd.io/snapshot/k8s-pod-name"
 	// LabelK8sContainerName informs the snapshotter about the K8s container name.
-	LabelK8sContainerName = "com.tecorigin.snapshotter/k8s-container-name"
+	LabelK8sContainerName = "containerd.io/snapshot/k8s-container-name"
 	// LabelSharedDiskPath specifies the base path on shared storage.
-	LabelSharedDiskPath = "com.tecorigin.snapshotter/shared-disk-path"
+	LabelSharedDiskPath = "containerd.io/snapshot/shared-disk-path"
 	// LabelUseSharedStorage is a marker to activate this custom logic.
-	LabelUseSharedStorage = "com.tecorigin.snapshotter/use-shared-storage" // Value "true"
+	LabelUseSharedStorage = "containerd.io/snapshot/use-shared-storage" // Value "true"
 )
 
 // SnapshotterConfig is used to configure the overlay snapshotter instance
@@ -122,15 +122,19 @@ func WithSlowChown(config *SnapshotterConfig) error {
 
 // isSharedSnapshot checks labels to see if this snapshot should use shared storage.
 func isSharedSnapshot(info snapshots.Info) bool {
-	if info.Labels == nil {
-		return false
+	log.L.Debugf("isSharedSnapshot: checking info.Labels: %+v", info.Labels)
+	if val, ok := info.Labels[LabelUseSharedStorage]; ok && val == "true" {
+		log.L.Debugf("isSharedSnapshot: returning true")
+		return true
 	}
-	return info.Labels[LabelUseSharedStorage] == "true"
+	log.L.Debugf("isSharedSnapshot: returning false")
+	return false
 }
 
 // getSharedPathBase constructs the base directory on shared storage for a given snapshot.
 // It requires the snapshot ID for uniqueness.
 func getSharedPathBase(info snapshots.Info, id string) (string, error) {
+	log.L.Debugf("getSharedPathBase: id=%s, info.Labels: %+v", id, info.Labels)
 	if info.Labels == nil {
 		return "", fmt.Errorf("missing labels for shared storage path construction")
 	}
@@ -147,8 +151,9 @@ func getSharedPathBase(info snapshots.Info, id string) (string, error) {
 		return "", fmt.Errorf("snapshot ID is required for shared storage path")
 	}
 
-	// Path: /<shared_disk_path>/<kubernetes_namespace>/<pod_name>/<container_name>/<snapshot_id>
-	return filepath.Join(sharedDiskPath, kubeNamespace, podName, containerName, id), nil
+	basePath := filepath.Join(sharedDiskPath, kubeNamespace, podName, containerName, id)
+	log.L.Debugf("getSharedPathBase: constructed basePath: %s", basePath)
+	return basePath, nil
 }
 
 type snapshotter struct {
@@ -579,6 +584,15 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			return fmt.Errorf("failed to get snapshot info after creation: %w", err)
 		}
 
+		// WORKAROUND: Manually apply snapshot options to the info struct.
+		// This is necessary because labels passed to CreateSnapshot via opts
+		// are not reflected in the Info object returned by GetInfo within the
+		// same database transaction.
+		for _, opt := range opts {
+			opt(&info)
+		}
+		log.G(ctx).Debugf("Manually applied opts to info. Final labels for snapshot %s: %+v", s.ID, info.Labels)
+
 		// Determine mapped UID/GID for chown, common for both local and shared
 		var (
 			mappedUID, mappedGID     = -1, -1
@@ -713,6 +727,7 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 
 func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mount {
 	var options []string
+	log.L.WithField("snapshotID", s.ID).WithField("kind", s.Kind).Debugf("mounts: determining mount options for snapshot")
 
 	if o.remapIDs {
 		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
@@ -728,6 +743,7 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 		log.L.WithError(upperErr).Errorf("Failed to determine upper path for snapshot %s, attempting fallback to local", s.ID)
 		actualUpperPath = filepath.Join(o.root, "snapshots", s.ID, "fs") // Fallback
 	}
+	log.L.WithField("snapshotID", s.ID).Debugf("mounts: determined upperdir to be %s", actualUpperPath)
 
 	if len(s.ParentIDs) == 0 {
 		roFlag := "rw"
@@ -752,6 +768,7 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 			log.L.WithError(workErr).Errorf("Failed to determine work path for snapshot %s, attempting fallback to local", s.ID)
 			actualWorkPath = filepath.Join(o.root, "snapshots", s.ID, "work") // Fallback
 		}
+		log.L.WithField("snapshotID", s.ID).Debugf("mounts: determined workdir to be %s", actualWorkPath)
 		options = append(options,
 			fmt.Sprintf("workdir=%s", actualWorkPath),
 			fmt.Sprintf("upperdir=%s", actualUpperPath),
@@ -793,15 +810,20 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 
 // determineUpperPath resolves the correct upper directory path.
 func (o *snapshotter) determineUpperPath(id string, info snapshots.Info) (string, error) {
+	log.L.WithField("snapshotID", id).Debug("determining upper path")
 	if isSharedSnapshot(info) {
+		log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned true, determining shared path")
 		// For KindActive, this is the RW layer.
 		// For KindCommitted or KindView, if it *was* a shared snapshot, its 'fs' is on shared storage.
 		base, err := getSharedPathBase(info, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to get shared path base for upperdir of snapshot %s: %w", id, err)
 		}
-		return filepath.Join(base, "fs"), nil
+		sharedPath := filepath.Join(base, "fs")
+		log.L.WithField("snapshotID", id).Debugf("determined shared upper path to be %s", sharedPath)
+		return sharedPath, nil
 	}
+	log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned false, using default local path")
 	// Default local path for non-shared snapshots or if determination fails
 	return filepath.Join(o.root, "snapshots", id, "fs"), nil
 }
@@ -809,13 +831,18 @@ func (o *snapshotter) determineUpperPath(id string, info snapshots.Info) (string
 // determineWorkPath resolves the correct work directory path.
 // Workdir is only relevant for KindActive.
 func (o *snapshotter) determineWorkPath(id string, info snapshots.Info) (string, error) {
+	log.L.WithField("snapshotID", id).Debug("determining work path")
 	if isSharedSnapshot(info) { // and info.Kind == snapshots.KindActive implicitly by usage context
+		log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned true, determining shared path")
 		base, err := getSharedPathBase(info, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to get shared path base for workdir of snapshot %s: %w", id, err)
 		}
-		return filepath.Join(base, "work"), nil
+		sharedPath := filepath.Join(base, "work")
+		log.L.WithField("snapshotID", id).Debugf("determined shared work path to be %s", sharedPath)
+		return sharedPath, nil
 	}
+	log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned false, using default local path")
 	// Default local path
 	return filepath.Join(o.root, "snapshots", id, "work"), nil
 }

@@ -425,6 +425,10 @@ type RuntimeConfig struct {
 	// IgnoreDeprecationWarnings is the list of the deprecation IDs (such as "io.containerd.deprecation/pull-schema-1-image")
 	// that should be ignored for checking "ContainerdHasNoDeprecationWarnings" condition.
 	IgnoreDeprecationWarnings []string `toml:"ignore_deprecation_warnings" json:"ignoreDeprecationWarnings"`
+
+	// SharedSnapshotPath is the base path on shared storage for custom snapshot upperdirs.
+	// If empty, the custom shared snapshot feature is disabled.
+	SharedSnapshotPath string `toml:"shared_snapshot_path" json:"sharedSnapshotPath"`
 }
 
 // X509KeyPairStreaming contains the x509 configuration for streaming
@@ -448,10 +452,6 @@ type Config struct {
 	RootDir string `json:"rootDir"`
 	// StateDir is the root directory path for managing volatile pod/container data
 	StateDir string `json:"stateDir"`
-
-	// SharedSnapshotPath is the base path on shared storage for custom snapshot upperdirs.
-	// If empty, the custom shared snapshot feature is disabled.
-	SharedSnapshotPath string `toml:"shared_snapshot_path" json:"sharedSnapshotPath"`
 }
 
 // ServerConfig contains all the configuration for the CRI API server.

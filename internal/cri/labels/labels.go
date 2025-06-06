@@ -76,13 +76,13 @@ const (
 	PodWindowsOverhead = "io.kubernetes.cri.pod-windows-overhead"
 	// Custom snapshotter labels for shared upperdir
 	// LabelK8sNamespace is the CRI label key for k8s namespace annotation
-	LabelK8sNamespace = "com.tecorigin.snapshotter/k8s-namespace"
+	LabelK8sNamespace = "containerd.io/snapshot/k8s-namespace"
 	// LabelK8sPodName is the CRI label key for k8s pod name annotation
-	LabelK8sPodName = "com.tecorigin.snapshotter/k8s-pod-name"
+	LabelK8sPodName = "containerd.io/snapshot/k8s-pod-name"
 	// LabelK8sContainerName is the CRI label key for k8s container name annotation
-	LabelK8sContainerName = "com.tecorigin.snapshotter/k8s-container-name"
+	LabelK8sContainerName = "containerd.io/snapshot/k8s-container-name"
 	// LabelSharedDiskPath is the CRI label key for shared disk path annotation
-	LabelSharedDiskPath = "com.tecorigin.snapshotter/shared-disk-path"
+	LabelSharedDiskPath = "containerd.io/snapshot/shared-disk-path"
 	// LabelUseSharedStorage is the CRI label key for use shared storage annotation
-	LabelUseSharedStorage = "com.tecorigin.snapshotter/use-shared-storage"
+	LabelUseSharedStorage = "containerd.io/snapshot/use-shared-storage"
 )

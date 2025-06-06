@@ -1,0 +1,169 @@
+# This is a minimal containerd configuration for Kubernetes
+# Generated for containerd v2.1.x
+version = 2
+root = "/data/containerd"
+state = "/run/containerd"
+oom_score = 0
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+  uid = 0
+  gid = 0
+
+[debug]
+  level = "debug"
+
+[metrics]
+  address = ""
+
+[plugins]
+  # Unified CRI plugin configuration
+  [plugins."io.containerd.grpc.v1.cri"]
+    disable_tcp_service = true
+    stream_server_address = "127.0.0.1"
+    stream_server_port = "0"
+    stream_idle_timeout = "4h0m0s"
+    enable_selinux = false
+    max_container_log_line_size = 16384
+    disable_apparmor = false
+    restrict_oom_score_adj = false
+    disable_proc_mount = false
+    unset_seccomp_profile = ""
+    tolerate_missing_hugetlb_controller = true
+    disable_hugetlb_controller = true
+    device_ownership_from_security_context = false
+    ignore_image_defined_volumes = false
+    netns_mounts_under_state_dir = false
+    enable_unprivileged_ports = false
+    enable_unprivileged_icmp = false
+    shared_snapshot_path = "/nvme1"
+    sandbox_image = "registry.tecorigin.local:5000/easzlab/pause:3.9"
+    stats_collect_period = 10
+    enable_cdi = false
+    cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
+    drain_exec_sync_io_timeout = "0s"
+
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      snapshotter = "overlayfs"
+      default_runtime_name = "runc"
+      disable_snapshot_annotations = true
+      discard_unpacked_layers = false
+
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          pod_annotations = []
+          container_annotations = []
+          privileged_without_host_devices = false
+          base_runtime_spec = ""
+
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
+
+    [plugins."io.containerd.grpc.v1.cri".cni]
+      bin_dir = "/opt/cni/bin"
+      conf_dir = "/etc/cni/net.d"
+      max_conf_num = 1
+      conf_template = "/etc/cni/net.d/10-default.conf"
+
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = ""
+
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+          endpoint = ["https://docker.nju.edu.cn/", "https://kuamavit.mirror.aliyuncs.com"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."gcr.io"]
+          endpoint = ["https://gcr.nju.edu.cn"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."k8s.gcr.io"]
+          endpoint = ["https://gcr.nju.edu.cn/google-containers/"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."quay.io"]
+          endpoint = ["https://quay.nju.edu.cn"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."ghcr.io"]
+          endpoint = ["https://ghcr.nju.edu.cn"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."nvcr.io"]
+          endpoint = ["https://ngc.nju.edu.cn"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."jfrog.tecorigin.net"]
+          endpoint = ["http://jfrog.tecorigin.net"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.tecorigin.io:5443"]
+          endpoint = ["https://registry.tecorigin.io:5443"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."business.tecorigin.io:5443"]
+          endpoint = ["https://business.tecorigin.io:5443"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."business1.tecorigin.io:5443"]
+          endpoint = ["https://business1.tecorigin.io:5443"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."business2.tecorigin.io:5443"]
+          endpoint = ["https://business2.tecorigin.io:5443"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.tecorigin.net:5443"]
+          endpoint = ["https://registry.tecorigin.net:5443"]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.tecorigin.local:5000"]
+          endpoint = ["http://registry.tecorigin.local:5000"]
+
+      [plugins."io.containerd.grpc.v1.cri".registry.configs]
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."jfrog.tecorigin.net"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."jfrog.tecorigin.net".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.io:5443"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.io:5443".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."business.tecorigin.io:5443"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."business.tecorigin.io:5443".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."business1.tecorigin.io:5443"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."business1.tecorigin.io:5443".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."business2.tecorigin.io:5443"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."business2.tecorigin.io:5443".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.net:5443"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.net:5443".tls]
+            insecure_skip_verify = true
+        [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.local:5000"]
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."registry.tecorigin.local:5000".tls]
+            insecure_skip_verify = true
+
+    [plugins."io.containerd.grpc.v1.cri".image_decryption]
+      key_model = "node"
+
+    [plugins."io.containerd.grpc.v1.cri".x509_key_pair_streaming]
+      tls_cert_file = ""
+      tls_key_file = ""
+
+  [plugins."io.containerd.gc.v1.scheduler"]
+    deletion_threshold = 0
+    mutation_threshold = 100
+    pause_threshold = 0.02
+    schedule_delay = "0s"
+    startup_delay = "100ms"
+
+  [plugins."io.containerd.internal.v1.opt"]
+    path = "/opt/containerd"
+
+  [plugins."io.containerd.metadata.v1.bolt"]
+    content_sharing_policy = "shared"
+
+  [plugins."io.containerd.monitor.v1.cgroups"]
+    no_prometheus = false
+
+  [plugins."io.containerd.runtime.v1.linux"]
+    no_shim = false
+    runtime = "runc"
+    runtime_root = ""
+    shim = "containerd-shim"
+    shim_debug = false
+
+  [plugins."io.containerd.runtime.v2.task"]
+    platforms = ["linux/amd64"]
+
+  [plugins."io.containerd.service.v1.diff-service"]
+    default = ["walking"]
+
+  [plugins."io.containerd.snapshotter.v1.overlayfs"]
+    root_path = ""
+    mount_options = []
+    sync_remove = false
+    upperdir_label = false
+
+[timeouts]
+  "io.containerd.timeout.shim.cleanup" = "5s"
+  "io.containerd.timeout.shim.load" = "5s"
+  "io.containerd.timeout.shim.shutdown" = "3s"
+  "io.containerd.timeout.task.state" = "2s" 

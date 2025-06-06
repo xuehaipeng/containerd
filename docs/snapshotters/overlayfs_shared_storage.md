@@ -70,11 +70,11 @@ When Kubernetes (via the kubelet and CRI plugin) requests container creation:
 1. The CRI plugin checks if `shared_snapshot_path` is configured.
 2. If configured, it extracts the pod's namespace, pod's name, and the container's name from the `PodSandboxConfig` and `ContainerConfig` provided in the `CreateContainerRequest`.
 3. It then prepares the snapshot for the container's writable layer by passing the following labels to the snapshotter:
-    - `com.tecorigin.snapshotter/k8s-namespace`: The Kubernetes namespace of the pod.
-    - `com.tecorigin.snapshotter/k8s-pod-name`: The name of the pod.
-    - `com.tecorigin.snapshotter/k8s-container-name`: The name of the container within the pod.
-    - `com.tecorigin.snapshotter/shared-disk-path`: The value of `shared_snapshot_path` from the containerd config.
-    - `com.tecorigin.snapshotter/use-shared-storage`: Set to `"true"` to activate the custom logic in the snapshotter.
+    - `containerd.io/snapshot/k8s-namespace`: The Kubernetes namespace of the pod.
+    - `containerd.io/snapshot/k8s-pod-name`: The name of the pod.
+    - `containerd.io/snapshot/k8s-container-name`: The name of the container within the pod.
+    - `containerd.io/snapshot/shared-disk-path`: The value of `shared_snapshot_path` from the containerd config.
+    - `containerd.io/snapshot/use-shared-storage`: Set to `"true"` to activate the custom logic in the snapshotter.
 
 There are no direct changes needed in Kubernetes pod specifications to *trigger* this, as it's based on the containerd CRI plugin's configuration. However, the pod's metadata (namespace, name) and container name are used for the path.
 
@@ -82,7 +82,7 @@ There are no direct changes needed in Kubernetes pod specifications to *trigger*
 
 The `plugins/snapshots/overlay/overlay.go` file was modified to interpret these labels:
 
-1.  **Label Recognition**: The snapshotter now checks for the presence of `com.tecorigin.snapshotter/use-shared-storage: "true"` and the other related labels (`k8s-namespace`, `k8s-pod-name`, `k8s-container-name`, `shared-disk-path`) on snapshots.
+1.  **Label Recognition**: The snapshotter now checks for the presence of `containerd.io/snapshot/use-shared-storage: "true"` and the other related labels (`k8s-namespace`, `k8s-pod-name`, `k8s-container-name`, `shared-disk-path`) on snapshots.
 2.  **Path Determination**:
     *   If these labels are present on an **active** snapshot (a container's writable layer):
         *   The `upperdir` path is constructed as: `LABELS[shared-disk-path]/LABELS[k8s-namespace]/LABELS[k8s-pod-name]/LABELS[k8s-container-name]/<SNAPSHOT_ID>/fs`
