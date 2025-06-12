@@ -122,12 +122,10 @@ func WithSlowChown(config *SnapshotterConfig) error {
 
 // isSharedSnapshot checks labels to see if this snapshot should use shared storage.
 func isSharedSnapshot(info snapshots.Info) bool {
-	log.L.Debugf("isSharedSnapshot: checking info.Labels: %+v", info.Labels)
 	if val, ok := info.Labels[LabelUseSharedStorage]; ok && val == "true" {
 		log.L.Debugf("isSharedSnapshot: returning true")
 		return true
 	}
-	log.L.Debugf("isSharedSnapshot: returning false")
 	return false
 }
 
@@ -454,10 +452,13 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	}
 	// Then remove shared directory if applicable
 	if isDirectoryShared && sharedPathToRemove != "" {
-		log.G(ctx).Infof("Removing shared snapshot data at %s", sharedPathToRemove)
-		if errR := os.RemoveAll(sharedPathToRemove); errR != nil {
-			log.G(ctx).WithError(errR).WithField("path", sharedPathToRemove).Warn("failed to remove shared directory")
-		}
+		log.G(ctx).Infof("Preserving shared snapshot data for potential resume. Path: %s", sharedPathToRemove)
+		// NOTE: The os.RemoveAll call is intentionally commented out to preserve the state
+		// on the shared storage for notebook resume scenarios. An external process will be
+		// responsible for the final cleanup of this directory.
+		// if errR := os.RemoveAll(sharedPathToRemove); errR != nil {
+		// 	log.G(ctx).WithError(errR).WithField("path", sharedPathToRemove).Warn("failed to remove shared directory")
+		// }
 	}
 	return nil
 }
@@ -823,7 +824,6 @@ func (o *snapshotter) determineUpperPath(id string, info snapshots.Info) (string
 		log.L.WithField("snapshotID", id).Debugf("determined shared upper path to be %s", sharedPath)
 		return sharedPath, nil
 	}
-	log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned false, using default local path")
 	// Default local path for non-shared snapshots or if determination fails
 	return filepath.Join(o.root, "snapshots", id, "fs"), nil
 }
@@ -842,7 +842,6 @@ func (o *snapshotter) determineWorkPath(id string, info snapshots.Info) (string,
 		log.L.WithField("snapshotID", id).Debugf("determined shared work path to be %s", sharedPath)
 		return sharedPath, nil
 	}
-	log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned false, using default local path")
 	// Default local path
 	return filepath.Join(o.root, "snapshots", id, "work"), nil
 }

@@ -40,7 +40,7 @@ To enable and use this feature, two main configuration steps are required:
 
 ### 2.1. Configure containerd's CRI Plugin
 
-The CRI plugin needs to be informed of the base path for the shared storage. In containerd v2.1 and later, the CRI plugin configuration is split. The `shared_snapshot_path` option should be placed in the `[plugins."io.containerd.cri.v1.runtime"]` section of your `config.toml`.
+The CRI plugin needs to be informed of the base path for the shared storage and the matching rules for which pods to apply the feature to. In containerd v2.1 and later, these options should be placed in the `[plugins."io.containerd.cri.v1.runtime"]` section of your `config.toml`.
 
 ```toml
 # Example: /etc/containerd/config.toml
@@ -53,38 +53,37 @@ version = 3
   [plugins."io.containerd.cri.v1.runtime"]
     # ... other runtime settings ...
 
-    # shared_snapshot_path specifies the base directory on the shared storage
-    # where container upperdirs will be placed if custom labels are present.
-    # If this is empty or not set, the custom shared upperdir functionality is disabled.
-    shared_snapshot_path = "/path/to/your/shared/storage" # e.g., "/tecofs-m"
+    # shared_snapshot_path specifies the base directory on the shared storage.
+    # This is required to enable the feature.
+    shared_snapshot_path = "/tecofs-m"
+
+    # (Optional) An RE2-compliant regular expression. If set, only pods in a
+    # namespace matching this pattern will use the shared snapshot feature.
+    # Example: "^kubecube-.*" matches all namespaces starting with "kubecube-".
+    # Example: ".*" matches all namespaces.
+    shared_snapshot_namespace_regex = "^kubecube-.*"
+
+    # (Optional) An RE2-compliant regular expression. If set, only pods with
+    # a name matching this pattern will use the shared snapshot feature.
+    # Example: "^nb-.*" matches all pod names starting with "nb-".
+    shared_snapshot_pod_name_regex = "^nb-.*"
 
     [plugins."io.containerd.cri.v1.runtime".containerd]
       snapshotter = "overlayfs"
       # ... other containerd settings ...
 ```
 
-Replace `"/path/to/your/shared/storage"` with the actual mount point or base path of your shared storage. If this field is empty or omitted, the custom functionality will not activate, and all snapshots will use the default local storage.
-
 After modifying the configuration, restart the containerd service:
 ```bash
 sudo systemctl restart containerd
 ```
 
-### 2.2. (Implicit) Kubernetes Integration - How Labels are Applied
+### 2.2. (Implicit) Kubernetes Integration - How It's Applied
 
-This customization relies on specific labels being applied to snapshots when they are created for a container's read-write layer. The modification made to `internal/cri/server/container_create.go` handles the injection of these labels automatically when `shared_snapshot_path` is configured.
-
-When Kubernetes (via the kubelet and CRI plugin) requests container creation:
-1. The CRI plugin checks if `shared_snapshot_path` is configured.
-2. If configured, it extracts the pod's namespace, pod's name, and the container's name from the `PodSandboxConfig` and `ContainerConfig` provided in the `CreateContainerRequest`.
-3. It then prepares the snapshot for the container's writable layer by passing the following labels to the snapshotter:
-    - `containerd.io/snapshot/k8s-namespace`: The Kubernetes namespace of the pod.
-    - `containerd.io/snapshot/k8s-pod-name`: The name of the pod.
-    - `containerd.io/snapshot/k8s-container-name`: The name of the container within the pod.
-    - `containerd.io/snapshot/shared-disk-path`: The value of `shared_snapshot_path` from the containerd config.
-    - `containerd.io/snapshot/use-shared-storage`: Set to `"true"` to activate the custom logic in the snapshotter.
-
-There are no direct changes needed in Kubernetes pod specifications to *trigger* this, as it's based on the containerd CRI plugin's configuration. However, the pod's metadata (namespace, name) and container name are used for the path.
+When Kubernetes requests container creation, the CRI plugin now checks for these settings:
+1. It verifies that `shared_snapshot_path` is configured.
+2. It checks if the pod's namespace and name match the `shared_snapshot_namespace_regex` and `shared_snapshot_pod_name_regex` rules, respectively. If a rule is not set, it is considered a match.
+3. If all configured rules pass, it injects the necessary labels (`containerd.io/snapshot/use-shared-storage: "true"`, etc.) into the snapshot options to activate the shared storage logic for that container.
 
 ## 3. How It Works - Snapshotter Modifications
 
@@ -97,8 +96,8 @@ The `plugins/snapshots/overlay/overlay.go` file was modified to interpret these 
         *   The `workdir` path is constructed as: `LABELS[shared-disk-path]/LABELS[k8s-namespace]/LABELS[k8s-pod-name]/LABELS[k8s-container-name]/<SNAPSHOT_ID>/work`
     *   If the labels are not present, or if the snapshot is not an active writable layer (e.g., it's a committed image layer), the snapshotter defaults to its standard local path construction (e.g., under `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/<SNAPSHOT_ID>/fs`).
 3.  **Directory Management**:
-    *   **Creation**: During the `Prepare` phase for an active snapshot with the special labels, the snapshotter creates the `fs` (upperdir) and `work` directories directly on the shared storage path. A local marker directory (`<containerd_root>/snapshots/<SNAPSHOT_ID>`) is also created but will not contain the `fs` or `work` directories.
-    *   **Deletion**: When a container (and its corresponding snapshot) is removed, if it was using a shared upperdir, the snapshotter will delete the entire directory tree for that snapshot ID on the shared storage (e.g., `/<configured_shared_path>/<namespace>/<pod_name>/<container_name>/<snapshot_id>/`). Local marker directories are also cleaned up.
+    *   **Creation**: During the `Prepare` phase for a matching active snapshot, the snapshotter creates the `fs` (upperdir) and `work` directories directly on the shared storage path.
+    *   **Preservation on Deletion**: When a container using the shared snapshot feature is removed, the snapshotter will **preserve the `upperdir` and `workdir` on the shared storage**. The `os.RemoveAll` call for the shared path is intentionally skipped. This is the key mechanism that allows a Notebook's state to persist across restarts. The final cleanup of these directories becomes the responsibility of an external orchestration process that knows when a Notebook instance is permanently deleted.
 4.  **Mounts**: The `mounts` operation correctly provides the shared `upperdir` and `workdir` to the `overlayfs` mount options when a shared snapshot is being mounted. The `lowerdir` will always point to local image layers.
 
 ## 4. Session Management, Image Committing, and Resuming Notebooks
