@@ -124,55 +124,66 @@ The current plugin implementation assigns a **new, unique snapshot ID** (and the
 
 **Workflow for Resuming from Previous Instance (within a Post-Start Hook):**
 
-1.  **New Pod Instance (`pod_B`)**: A new pod (`pod_B`) is started, intended to resume/replace a previous instance (`pod_A`) of the same logical Notebook. It shares the same K8s Namespace, intended Pod Name, and Container Name.
-2.  **Plugin Creates New Shared `upperdir` (`P_target_host_path`)**: The customized plugin creates a new, empty shared `upperdir` for `pod_B`:
-    `P_target_host_path = /<shared_path_cfg>/<ns>/<pod_name>/<container_name>/<snap_B_id>/fs`
-3.  **Post-Start Hook Execution**: A script in `pod_B`'s Post-Start hook (or an Init Container) executes with the following logic:
-    a.  **Determine Own `upperdir`**: The script discovers the host path to its *own* newly created shared `upperdir` (`P_target_host_path`) by parsing `/proc/self/mountinfo` to find the `upperdir=` option for its root (`/`) mount.
-        ```bash
-        # Example snippet for Post-Start script
-        MY_OWN_UPPERDIR_HOST_PATH=$(awk '/ \/ overlay / && /upperdir=/ { for (i=1; i<=NF; i++) { if (match($i, /^upperdir=([^,]+)/, arr)) { print arr[1]; exit } } }' /proc/self/mountinfo)
-        if [ -z "$MY_OWN_UPPERDIR_HOST_PATH" ]; then
-            echo "ERROR: Could not determine own shared upperdir. Proceeding with empty session." >&2
-            exit 0 # Or exit 1 to fail the hook, depending on desired behavior
-        fi
-        MY_OWN_SNAPSHOT_ID=$(basename "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
+1. **New Pod Instance (`pod_B`)**: A new pod (`pod_B`) is started, intended to resume/replace a previous instance (`pod_A`) of the same logical Notebook. It shares the same K8s Namespace, intended Pod Name, and Container Name.
+
+2. **Plugin Creates New Shared `upperdir` (`P_target_host_path`)**: The customized plugin creates a new, empty shared `upperdir` for `pod_B`:
+   ```
+   P_target_host_path = /<shared_path_cfg>/<ns>/<pod_name>/<container_name>/<snap_B_id>/fs
+   ```
+
+3. **Post-Start Hook Execution**: A script in `pod_B`'s Post-Start hook (or an Init Container) executes with the following logic:
+
+   a. **Determine Own `upperdir`**: The script discovers the host path to its *own* newly created shared `upperdir` (`P_target_host_path`) by parsing `/proc/self/mountinfo` to find the `upperdir=` option for its root (`/`) mount.
+
+   ```bash
+   # Example snippet for Post-Start script
+   MY_OWN_UPPERDIR_HOST_PATH=$(awk '/ \/ overlay / && /upperdir=/ { for (i=1; i<=NF; i++) { if (match($i, /^upperdir=([^,]+)/, arr)) { print arr[1]; exit } } }' /proc/self/mountinfo)
+   if [ -z "$MY_OWN_UPPERDIR_HOST_PATH" ]; then
+       echo "ERROR: Could not determine own shared upperdir. Proceeding with empty session." >&2
+       exit 0 # Or exit 1 to fail the hook, depending on desired behavior
+   fi
+   MY_OWN_SNAPSHOT_ID=$(basename "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
+   ```
+
+   b. **Identify Potential Previous Session Directory (`P_source_host_path`)**:
+      - The script constructs the base path where snapshot directories for this Notebook identity reside:
         ```
-    b.  **Identify Potential Previous Session Directory (`P_source_host_path`)**:
-        *   The script constructs the base path where snapshot directories for this Notebook identity reside:
-          `NOTEBOOK_SESSIONS_BASE_HOST_PATH=$(dirname "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")`
-          (This resolves to `/<shared_path_cfg>/<ns>/<pod_name>/<container_name>/`)
-        *   It lists subdirectories (potential snapshot IDs) within `NOTEBOOK_SESSIONS_BASE_HOST_PATH`.
-        *   It searches for a directory that is *not* its own (`$MY_OWN_SNAPSHOT_ID`). If multiple such directories exist (e.g., from multiple previous unclean shutdowns), a strategy is needed (e.g., pick the one with the most recent modification time, or expect only one). For simplicity, this example assumes finding one, or the most recent valid one.
-            ```bash
-            PREVIOUS_SNAPSHOT_ID=""
-            # Simplified: find any other snapshot ID. Robust script would sort by mtime.
-            for D_HOST_PATH in "$NOTEBOOK_SESSIONS_BASE_HOST_PATH"/* ; do
-                if [ -d "${D_HOST_PATH}/fs" ]; then # Check if it looks like a snapshot dir with an fs subdir
-                    SNAP_ID=$(basename "$D_HOST_PATH")
-                    if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
-                        # Basic: take the first one found. A real script might compare mtimes.
-                        PREVIOUS_SNAPSHOT_ID=$SNAP_ID 
-                        break 
-                    fi
-                fi
-            done
-            ```
-    c.  **Copy and Cleanup (if previous session found)**:
-        *   If a `$PREVIOUS_SNAPSHOT_ID` is found:
-            ```bash
-            P_source_host_path="${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}/fs"
-            echo "Previous session found at $P_source_host_path. Restoring to $MY_OWN_UPPERDIR_HOST_PATH ..."
-            rsync -avp --delete "${P_source_host_path}/" "${MY_OWN_UPPERDIR_HOST_PATH}/"
-            if [ $? -eq 0 ]; then
-                echo "Restore successful. Cleaning up old session directory: ${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}"
-                rm -rf "${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}"
-            else
-                echo "ERROR: rsync failed during restore. Old session data NOT cleaned up." >&2
-                # Potentially exit 1 to make PostStart hook fail
-            fi
-            ```
-        *   If no previous session directory is found, the script logs this and exits gracefully, allowing the Notebook to start with a fresh (empty) shared `upperdir`.
+        NOTEBOOK_SESSIONS_BASE_HOST_PATH=$(dirname "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
+        ```
+        (This resolves to `/<shared_path_cfg>/<ns>/<pod_name>/<container_name>/`)
+      - It lists subdirectories (potential snapshot IDs) within `NOTEBOOK_SESSIONS_BASE_HOST_PATH`.
+      - It searches for a directory that is *not* its own (`$MY_OWN_SNAPSHOT_ID`). If multiple such directories exist (e.g., from multiple previous unclean shutdowns), a strategy is needed (e.g., pick the one with the most recent modification time, or expect only one). For simplicity, this example assumes finding one, or the most recent valid one.
+
+   ```bash
+   PREVIOUS_SNAPSHOT_ID=""
+   # Simplified: find any other snapshot ID. Robust script would sort by mtime.
+   for D_HOST_PATH in "$NOTEBOOK_SESSIONS_BASE_HOST_PATH"/* ; do
+       if [ -d "${D_HOST_PATH}/fs" ]; then # Check if it looks like a snapshot dir with an fs subdir
+           SNAP_ID=$(basename "$D_HOST_PATH")
+           if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
+               # Basic: take the first one found. A real script might compare mtimes.
+               PREVIOUS_SNAPSHOT_ID=$SNAP_ID 
+               break 
+           fi
+       fi
+   done
+   ```
+
+   c. **Copy and Cleanup (if previous session found)**:
+      - If a `$PREVIOUS_SNAPSHOT_ID` is found:
+        ```bash
+        P_source_host_path="${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}/fs"
+        echo "Previous session found at $P_source_host_path. Restoring to $MY_OWN_UPPERDIR_HOST_PATH ..."
+        rsync -avp --delete "${P_source_host_path}/" "${MY_OWN_UPPERDIR_HOST_PATH}/"
+        if [ $? -eq 0 ]; then
+            echo "Restore successful. Cleaning up old session directory: ${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}"
+            rm -rf "${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}"
+        else
+            echo "ERROR: rsync failed during restore. Old session data NOT cleaned up." >&2
+            # Potentially exit 1 to make PostStart hook fail
+        fi
+        ```
+      - If no previous session directory is found, the script logs this and exits gracefully, allowing the Notebook to start with a fresh (empty) shared `upperdir`.
 
 **Assumptions for this Resume Method:**
 - The shared storage path is accessible by the Post-Start hook (e.g., mounted into a helper container or the main container has tools like `rsync` and permissions).
