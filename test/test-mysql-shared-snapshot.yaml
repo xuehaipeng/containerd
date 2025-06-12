@@ -25,114 +25,7 @@ spec:
             exec:
               command:
                 - "/bin/sh"
-                - "-c"
-                - |
-                  # Write to a file to prove the hook ran
-                  echo "POST-START HOOK EXECUTED at $(date)" > /tmp/poststart.log 2>&1
-                  echo "=== Post-Start Hook: Checking for previous session data ===" >> /tmp/poststart.log 2>&1
-                  
-                  # Also try to write to stdout/stderr
-                  echo "POST-START HOOK RUNNING" >&1
-                  echo "POST-START HOOK RUNNING" >&2
-                  
-                  # Determine own upperdir from mount info
-                  MY_OWN_UPPERDIR_HOST_PATH=$(awk '/overlay/ && /upperdir=/ { 
-                    # Find the field containing upperdir=
-                    for (i=1; i<=NF; i++) { 
-                      if ($i ~ /upperdir=/) { 
-                        # Extract everything after upperdir= and before the next comma
-                        match($i, /upperdir=([^,]+)/, arr)
-                        if (arr[1] != "") {
-                          print arr[1]
-                          exit
-                        }
-                      } 
-                    } 
-                  }' /proc/self/mountinfo)
-                  
-                  echo "Raw mount info:" >> /tmp/poststart.log 2>&1
-                  cat /proc/self/mountinfo | grep overlay >> /tmp/poststart.log 2>&1
-                  echo "Extracted upperdir: '$MY_OWN_UPPERDIR_HOST_PATH'" >> /tmp/poststart.log 2>&1
-                  
-                  if [ -z "$MY_OWN_UPPERDIR_HOST_PATH" ]; then
-                      echo "ERROR: Could not determine own shared upperdir. Proceeding with empty session." >> /tmp/poststart.log 2>&1
-                      exit 0
-                  fi
-                  
-                  echo "Current upperdir: $MY_OWN_UPPERDIR_HOST_PATH" >> /tmp/poststart.log 2>&1
-                  MY_OWN_SNAPSHOT_ID=$(basename "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
-                  echo "Current snapshot ID: $MY_OWN_SNAPSHOT_ID" >> /tmp/poststart.log 2>&1
-                  
-                  # Construct base path for this notebook identity
-                  NOTEBOOK_SESSIONS_BASE_HOST_PATH=$(dirname "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
-                  echo "Base sessions path: $NOTEBOOK_SESSIONS_BASE_HOST_PATH" >> /tmp/poststart.log 2>&1
-                  
-                  # Expected path based on the configuration: /nvme1/default/test-shared-snapshot-mysql/mysql/
-                  EXPECTED_BASE_PATH="/nvme1/default/test-shared-snapshot-mysql-0/mysql"
-                  if [ "$NOTEBOOK_SESSIONS_BASE_HOST_PATH" != "$EXPECTED_BASE_PATH" ]; then
-                      echo "WARNING: Detected base path ($NOTEBOOK_SESSIONS_BASE_HOST_PATH) differs from expected ($EXPECTED_BASE_PATH)" >> /tmp/poststart.log 2>&1
-                  fi
-                  
-                  # Look for previous session directories
-                  PREVIOUS_SNAPSHOT_ID=""
-                  PREVIOUS_SNAPSHOT_PATH=""
-                  
-                  if [ -d "$NOTEBOOK_SESSIONS_BASE_HOST_PATH" ]; then
-                      echo "Scanning for previous session directories..." >> /tmp/poststart.log 2>&1
-                      for D_HOST_PATH in "$NOTEBOOK_SESSIONS_BASE_HOST_PATH"/* ; do
-                          if [ -d "${D_HOST_PATH}/fs" ]; then
-                              SNAP_ID=$(basename "$D_HOST_PATH")
-                              if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
-                                  # Check if directory has content (non-empty)
-                                  if [ "$(ls -A "${D_HOST_PATH}/fs" 2>/dev/null)" ]; then
-                                      echo "Found non-empty previous session: $SNAP_ID" >> /tmp/poststart.log 2>&1
-                                      PREVIOUS_SNAPSHOT_ID=$SNAP_ID
-                                      PREVIOUS_SNAPSHOT_PATH="${D_HOST_PATH}/fs"
-                                      break
-                                  else
-                                      echo "Found empty previous session: $SNAP_ID (skipping)" >> /tmp/poststart.log 2>&1
-                                  fi
-                              fi
-                          fi
-                      done
-                  fi
-                  
-                  # Restore from previous session if found
-                  if [ -n "$PREVIOUS_SNAPSHOT_ID" ] && [ -n "$PREVIOUS_SNAPSHOT_PATH" ]; then
-                      echo "=== Restoring from previous session: $PREVIOUS_SNAPSHOT_ID ===" >> /tmp/poststart.log 2>&1
-                      echo "Source: $PREVIOUS_SNAPSHOT_PATH" >> /tmp/poststart.log 2>&1
-                      echo "Target: $MY_OWN_UPPERDIR_HOST_PATH" >> /tmp/poststart.log 2>&1
-                      
-                      # Use rsync to copy data (preserving permissions, timestamps, etc.)
-                      if command -v rsync >/dev/null 2>&1; then
-                          echo "Using rsync for data migration..." >> /tmp/poststart.log 2>&1
-                          rsync -avp --delete "${PREVIOUS_SNAPSHOT_PATH}/" "${MY_OWN_UPPERDIR_HOST_PATH}/" >> /tmp/poststart.log 2>&1
-                          COPY_EXIT_CODE=$?
-                      else
-                          echo "rsync not available, using cp..." >> /tmp/poststart.log 2>&1
-                          cp -rp "${PREVIOUS_SNAPSHOT_PATH}/." "${MY_OWN_UPPERDIR_HOST_PATH}/" >> /tmp/poststart.log 2>&1
-                          COPY_EXIT_CODE=$?
-                      fi
-                      
-                      if [ $COPY_EXIT_CODE -eq 0 ]; then
-                          echo "=== Data migration successful ===" >> /tmp/poststart.log 2>&1
-                          echo "Cleaning up old session directory: ${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}" >> /tmp/poststart.log 2>&1
-                          rm -rf "${NOTEBOOK_SESSIONS_BASE_HOST_PATH}/${PREVIOUS_SNAPSHOT_ID}" >> /tmp/poststart.log 2>&1
-                          if [ $? -eq 0 ]; then
-                              echo "Old session directory cleaned up successfully" >> /tmp/poststart.log 2>&1
-                          else
-                              echo "WARNING: Failed to clean up old session directory" >> /tmp/poststart.log 2>&1
-                          fi
-                      else
-                          echo "ERROR: Data migration failed (exit code: $COPY_EXIT_CODE). Old session data NOT cleaned up." >> /tmp/poststart.log 2>&1
-                          echo "Manual intervention may be required." >> /tmp/poststart.log 2>&1
-                          # Don't exit with error to allow container to start
-                      fi
-                  else
-                      echo "No previous session data found. Starting with fresh session." >> /tmp/poststart.log 2>&1
-                  fi
-                  
-                  echo "=== Post-Start Hook completed ===" >> /tmp/poststart.log 2>&1
+                - "/scripts/post_start_hook.sh"
         # Adding a simple command to ensure it writes some data and keeps running
         # MySQL will initialize its data directory on first start.
         # We'll also write a test file to a common location.
@@ -180,8 +73,15 @@ spec:
         volumeMounts:
         - name: shared-storage
           mountPath: /nvme1
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
       volumes:
       - name: shared-storage
+        hostPath:
+          path: /nvme1
+          type: Directory
+      - name: scripts
         hostPath:
           path: /nvme1
           type: Directory 
