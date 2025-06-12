@@ -40,19 +40,27 @@ To enable and use this feature, two main configuration steps are required:
 
 ### 2.1. Configure containerd's CRI Plugin
 
-The CRI plugin needs to be informed of the base path for the shared storage. This is done by adding the `shared_snapshot_path` option to the containerd configuration file (typically `/etc/containerd/config.toml`).
+The CRI plugin needs to be informed of the base path for the shared storage. In containerd v2.1 and later, the CRI plugin configuration is split. The `shared_snapshot_path` option should be placed in the `[plugins."io.containerd.cri.v1.runtime"]` section of your `config.toml`.
 
 ```toml
 # Example: /etc/containerd/config.toml
-version = 2
+version = 3
+# ... other global settings ...
 
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  # ... other CRI plugin settings ...
+[plugins]
+  # ... other plugins ...
 
-  # shared_snapshot_path specifies the base directory on the shared storage
-  # where container upperdirs will be placed if custom labels are present.
-  # If this is empty or not set, the custom shared upperdir functionality is disabled.
-  shared_snapshot_path = "/path/to/your/shared/storage" # e.g., "/tecofs-m"
+  [plugins."io.containerd.cri.v1.runtime"]
+    # ... other runtime settings ...
+
+    # shared_snapshot_path specifies the base directory on the shared storage
+    # where container upperdirs will be placed if custom labels are present.
+    # If this is empty or not set, the custom shared upperdir functionality is disabled.
+    shared_snapshot_path = "/path/to/your/shared/storage" # e.g., "/tecofs-m"
+
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+      snapshotter = "overlayfs"
+      # ... other containerd settings ...
 ```
 
 Replace `"/path/to/your/shared/storage"` with the actual mount point or base path of your shared storage. If this field is empty or omitted, the custom functionality will not activate, and all snapshots will use the default local storage.

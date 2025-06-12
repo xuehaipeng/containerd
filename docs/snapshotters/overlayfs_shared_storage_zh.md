@@ -40,19 +40,27 @@ Notebook 工作负载通常是单容器 Pod，用户在其中进行迭代式开�
 
 ### 2.1. 配置 containerd 的 CRI 插件
 
-CRI 插件需要知道共享存储的基础路径。这通过在 containerd 配置文件（通常是 `/etc/containerd/config.toml`）中添加 `shared_snapshot_path` 选项来完成。
+CRI 插件需要知道共享存储的基础路径。在 containerd v2.1 及更高版本中，CRI 插件的配置已被拆分。`shared_snapshot_path` 选项应放置在 `config.toml` 文件的 `[plugins."io.containerd.cri.v1.runtime"]` 部分。
 
 ```toml
 # 示例: /etc/containerd/config.toml
-version = 2
+version = 3
+# ... 其他全局设置 ...
 
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  # ... 其他 CRI 插件设置 ...
+[plugins]
+  # ... 其他插件 ...
 
-  # shared_snapshot_path 指定共享存储上的基础目录，
-  # 如果存在自定义标签，容器的 upperdir 将放置在此处。
-  # 如果此字段为空或未设置，则禁用自定义共享 upperdir 功能。
-  shared_snapshot_path = "/path/to/your/shared/storage" # 例如 "/tecofs-m"
+  [plugins."io.containerd.cri.v1.runtime"]
+    # ... 其他运行时设置 ...
+
+    # shared_snapshot_path 指定共享存储上的基础目录，
+    # 如果存在自定义标签，容器的 upperdir 将放置在此处。
+    # 如果此字段为空或未设置，则禁用自定义共享 upperdir 功能。
+    shared_snapshot_path = "/path/to/your/shared/storage" # 例如 "/tecofs-m"
+
+    [plugins."io.containerd.cri.v1.runtime".containerd]
+      snapshotter = "overlayfs"
+      # ... 其他 containerd 设置 ...
 ```
 
 将 `"/path/to/your/shared/storage"` 替换为共享存储的实际挂载点或基础路径。如果此字段为空或省略，自定义功能将不会激活，所有快照将使用默认的本地存储。

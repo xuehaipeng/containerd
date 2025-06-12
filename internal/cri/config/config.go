@@ -429,6 +429,14 @@ type RuntimeConfig struct {
 	// SharedSnapshotPath is the base path on shared storage for custom snapshot upperdirs.
 	// If empty, the custom shared snapshot feature is disabled.
 	SharedSnapshotPath string `toml:"shared_snapshot_path" json:"sharedSnapshotPath"`
+
+	// SharedSnapshotNamespaceRegex is an optional regex. If set, only pods in
+	// namespaces matching this pattern will use the shared snapshot feature.
+	SharedSnapshotNamespaceRegex string `toml:"shared_snapshot_namespace_regex" json:"sharedSnapshotNamespaceRegex"`
+
+	// SharedSnapshotPodNameRegex is an optional regex. If set, only pods with
+	// names matching this pattern will use the shared snapshot feature.
+	SharedSnapshotPodNameRegex string `toml:"shared_snapshot_pod_name_regex" json:"sharedSnapshotPodNameRegex"`
 }
 
 // X509KeyPairStreaming contains the x509 configuration for streaming

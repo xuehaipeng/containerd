@@ -62,3 +62,15 @@ However, the mountpoint `/path/inside/container` needs to exist for the bind
 mount, so one of the previous mounts must be responsible for providing that
 directory in the rootfs. In this case, one of the lower dirs of the overlay has
 that directory to enable the bind mount.
+
+
+
+
+
+
+
+- [ ] 50*15=75
+- [ ] 85=5.66*15
+- [ ] 10:00 - 7:00
+- [ ]
+

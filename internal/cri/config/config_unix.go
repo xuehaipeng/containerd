@@ -105,5 +105,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		DrainExecSyncIOTimeout:           "0s",
 		EnableUnprivilegedPorts:          true,
 		EnableUnprivilegedICMP:           true,
+		SharedSnapshotNamespaceRegex:     "",
+		SharedSnapshotPodNameRegex:       "",
 	}
 }

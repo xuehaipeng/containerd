@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -376,13 +377,38 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 
 	if c.config.RuntimeConfig.SharedSnapshotPath != "" {
 		podSandboxMeta := r.podSandboxConfig.GetMetadata()
-		containerMeta := r.containerConfig.GetMetadata()
-		log.G(r.ctx).Debugf("SharedSnapshotPath is configured: %s", c.config.RuntimeConfig.SharedSnapshotPath)
-		if podSandboxMeta != nil && containerMeta != nil {
+		if podSandboxMeta != nil {
 			kubeNamespace := podSandboxMeta.GetNamespace()
 			podName := podSandboxMeta.GetName()
 			log.G(r.ctx).Debugf("Pod metadata: namespace=%s, name=%s, containerName=%s", kubeNamespace, podName, r.containerName)
-			if kubeNamespace != "" && podName != "" && r.containerName != "" {
+
+			// Check if the pod matches the configured regex rules.
+			useSharedSnapshot := true
+			if nsRegex := c.config.RuntimeConfig.SharedSnapshotNamespaceRegex; nsRegex != "" {
+				matched, err := regexp.MatchString(nsRegex, kubeNamespace)
+				if err != nil {
+					log.G(r.ctx).WithError(err).Errorf("Invalid namespace matching regex: %s", nsRegex)
+					useSharedSnapshot = false
+				} else if !matched {
+					useSharedSnapshot = false
+					log.G(r.ctx).Debugf("Skipping shared snapshot for pod %s/%s: namespace does not match regex '%s'", kubeNamespace, podName, nsRegex)
+				}
+			}
+
+			if useSharedSnapshot {
+				if podRegex := c.config.RuntimeConfig.SharedSnapshotPodNameRegex; podRegex != "" {
+					matched, err := regexp.MatchString(podRegex, podName)
+					if err != nil {
+						log.G(r.ctx).WithError(err).Errorf("Invalid pod name matching regex: %s", podRegex)
+						useSharedSnapshot = false
+					} else if !matched {
+						useSharedSnapshot = false
+						log.G(r.ctx).Debugf("Skipping shared snapshot for pod %s/%s: pod name does not match regex '%s'", kubeNamespace, podName, podRegex)
+					}
+				}
+			}
+
+			if useSharedSnapshot && kubeNamespace != "" && podName != "" && r.containerName != "" {
 				customLabels := make(map[string]string)
 				customLabels[crilabels.LabelK8sNamespace] = kubeNamespace
 				customLabels[crilabels.LabelK8sPodName] = podName
@@ -391,8 +417,6 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 				customLabels[crilabels.LabelUseSharedStorage] = "true"
 				sOpts = append(sOpts, snapshots.WithLabels(customLabels))
 				log.G(r.ctx).Infof("Preparing snapshot for container %s with custom shared storage labels: %+v", r.containerID, customLabels)
-			} else {
-				log.G(r.ctx).Warnf("Missing required metadata for shared storage: namespace=%s, pod=%s, container=%s", kubeNamespace, podName, r.containerName)
 			}
 		} else {
 			log.G(r.ctx).Warnf("Pod or container metadata is nil")
