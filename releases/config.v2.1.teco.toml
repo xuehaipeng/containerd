@@ -68,7 +68,7 @@ version = 3
         [plugins."io.containerd.cri.v1.images".registry.mirrors."registry.tecorigin.local:5000"]
           endpoint = ["http://registry.tecorigin.local:5000"]
         [plugins."io.containerd.cri.v1.images".registry.mirrors."docker.io"]
-          endpoint = ["https://docker.nju.edu.cn/", "https://kuamavit.mirror.aliyuncs.com"]
+          endpoint = ["https://docker.1ms.run", "https://hub.mirrorify.net", "https://docker.m.daocloud.io", "https://hub-mirror.c.163.com", "https://docker.nju.edu.cn/", "https://kuamavit.mirror.aliyuncs.com"]
         [plugins."io.containerd.cri.v1.images".registry.mirrors."gcr.io"]
           endpoint = ["https://gcr.nju.edu.cn"]
         [plugins."io.containerd.cri.v1.images".registry.mirrors."k8s.gcr.io"]
@@ -123,7 +123,7 @@ version = 3
     shared_snapshot_pod_name_regex = "^nb-.*"
 
     [plugins."io.containerd.cri.v1.runtime".containerd]
-      default_runtime_name = "runc"
+      default_runtime_name = "teco"
       ignore_blockio_not_enabled_errors = false
       ignore_rdt_not_enabled_errors = false
 
@@ -153,6 +153,33 @@ version = 3
             NoNewKeyring = false
             Root = ""
             ShimCgroup = ""
+
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.teco]
+          runtime_type = "io.containerd.runc.v2"
+          runtime_path = ""
+          pod_annotations = []
+          container_annotations = []
+          privileged_without_host_devices = false
+          privileged_without_host_devices_all_devices_allowed = false
+          cgroup_writable = false
+          base_runtime_spec = ""
+          cni_conf_dir = ""
+          cni_max_conf_num = 0
+          snapshotter = ""
+          sandboxer = "podsandbox"
+          io_type = ""
+
+          [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.teco.options]
+            SystemdCgroup = true
+            BinaryName = "/usr/bin/teco-container-runtime"
+            CriuImagePath = ""
+            CriuWorkPath = ""
+            IoGid = 0
+            IoUid = 0
+            NoNewKeyring = false
+            Root = ""
+            ShimCgroup = ""
+            env = ["LD_LIBRARY_PATH=/opt/tecoai/lib64:/opt/mellanox/sharp/lib:/usr/mpi/gcc/openmpi-4.1.5rc2/lib"]
 
     [plugins."io.containerd.cri.v1.runtime".cni]
       bin_dir = ""

@@ -4,11 +4,29 @@
 # This script handles migration of data from previous sessions to the current session
 
 LOG_FILE="/tmp/poststart.log"
+LOCK_FILE="/tmp/poststart.lock"
 
 # Function to log messages
 log() {
     echo "$1" >> "$LOG_FILE" 2>&1
 }
+
+# Check if another instance is running
+if [ -f "$LOCK_FILE" ]; then
+    log "Another instance is running. Exiting."
+    exit 0
+fi
+
+# Create lock file
+echo "$$" > "$LOCK_FILE"
+
+# Cleanup function
+cleanup() {
+    rm -f "$LOCK_FILE"
+}
+
+# Set up trap to ensure lock file is removed
+trap cleanup EXIT
 
 # Initialize log
 echo "POST-START HOOK EXECUTED at $(date)" > "$LOG_FILE" 2>&1
@@ -80,6 +98,8 @@ if [ -d "$NOTEBOOK_SESSIONS_BASE_HOST_PATH" ]; then
                 else
                     log "Found empty previous session: $SNAP_ID (skipping)"
                 fi
+            else
+                log "Skipping current session directory: $SNAP_ID"
             fi
         fi
     done
