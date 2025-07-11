@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -59,13 +58,13 @@ const (
 
 // SnapshotterConfig is used to configure the overlay snapshotter instance
 type SnapshotterConfig struct {
-	asyncRemove     bool
-	upperdirLabel   bool
-	ms              MetaStore
-	mountOptions    []string
-	remapIDs        bool
-	slowChown       bool
-	shortBasePaths  bool  // Enable short base paths for mount options optimization
+	asyncRemove    bool
+	upperdirLabel  bool
+	ms             MetaStore
+	mountOptions   []string
+	remapIDs       bool
+	slowChown      bool
+	shortBasePaths bool // Enable short base paths for mount options optimization
 }
 
 // Opt is an option to configure the overlay snapshotter
@@ -183,13 +182,13 @@ func hashString(s string) string {
 }
 
 type snapshotter struct {
-	root          string
-	ms            MetaStore
-	asyncRemove   bool
-	upperdirLabel bool
-	options       []string
-	remapIDs      bool
-	slowChown     bool
+	root           string
+	ms             MetaStore
+	asyncRemove    bool
+	upperdirLabel  bool
+	options        []string
+	remapIDs       bool
+	slowChown      bool
 	shortBasePaths bool
 }
 
@@ -237,13 +236,13 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	snapshotter := &snapshotter{
-		root:          root,
-		ms:            config.ms,
-		asyncRemove:   config.asyncRemove,
-		upperdirLabel: config.upperdirLabel,
-		options:       config.mountOptions,
-		remapIDs:      config.remapIDs,
-		slowChown:     config.slowChown,
+		root:           root,
+		ms:             config.ms,
+		asyncRemove:    config.asyncRemove,
+		upperdirLabel:  config.upperdirLabel,
+		options:        config.mountOptions,
+		remapIDs:       config.remapIDs,
+		slowChown:      config.slowChown,
 		shortBasePaths: config.shortBasePaths,
 	}
 
@@ -264,7 +263,10 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 // getSnapshotPath returns the path for snapshots, using short paths if enabled
 func (o *snapshotter) getSnapshotPath(id string) string {
 	if o.shortBasePaths {
-		return filepath.Join("/s", "l", id)
+		// Use the containerd root's parent directory as the base for short paths
+		// This assumes the root is something like "/s/d" and we want "/s/l"
+		baseDir := filepath.Dir(o.root)
+		return filepath.Join(baseDir, "l", id)
 	}
 	return filepath.Join(o.root, "snapshots", id)
 }
@@ -282,7 +284,9 @@ func (o *snapshotter) getSnapshotWorkPath(id string) string {
 // getSnapshotsRoot returns the root directory for snapshots
 func (o *snapshotter) getSnapshotsRoot() string {
 	if o.shortBasePaths {
-		return "/s/l"
+		// Use the containerd root's parent directory as the base for short paths
+		baseDir := filepath.Dir(o.root)
+		return filepath.Join(baseDir, "l")
 	}
 	return filepath.Join(o.root, "snapshots")
 }
@@ -292,24 +296,28 @@ func (o *snapshotter) ensureShortPathsExist() error {
 	if !o.shortBasePaths {
 		return nil
 	}
-	
+
+	// Use the containerd root's parent directory as the base for short paths
+	baseDir := filepath.Dir(o.root)
+	shortSnapshotsDir := filepath.Join(baseDir, "l")
+
 	// Create the short path directories
-	if err := os.MkdirAll("/s/l", 0700); err != nil {
+	if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create short snapshots directory: %w", err)
 	}
-	
+
 	// Create symlinks to maintain compatibility
 	originalSnapshotsDir := filepath.Join(o.root, "snapshots")
 	if _, err := os.Stat(originalSnapshotsDir); err == nil {
 		// Original exists, check if we need to migrate
-		if _, err := os.Stat("/s/l"); err == nil {
-			// Both exist, check if /s/l is a symlink to original
-			if target, err := os.Readlink("/s/l"); err != nil || target != originalSnapshotsDir {
-				log.L.Warnf("Short paths directory /s/l exists but is not linked to %s. Manual migration may be required.", originalSnapshotsDir)
+		if _, err := os.Stat(shortSnapshotsDir); err == nil {
+			// Both exist, check if short path is a symlink to original
+			if target, err := os.Readlink(shortSnapshotsDir); err != nil || target != originalSnapshotsDir {
+				log.L.Warnf("Short paths directory %s exists but is not linked to %s. Manual migration may be required.", shortSnapshotsDir, originalSnapshotsDir)
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -541,12 +549,7 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 			log.G(ctx).WithError(errR).WithField("path", dir).Warn("failed to remove local directory")
 		}
 	}
-	
-	// Clean up symbolic links if they exist for this snapshot
-	if err := o.cleanupShortLinks(id); err != nil {
-		log.G(ctx).WithError(err).Warnf("Failed to cleanup short links for snapshot %s", id)
-	}
-	
+
 	// Then remove shared directory if applicable
 	if isDirectoryShared && sharedPathToRemove != "" {
 		log.G(ctx).Infof("Preserving shared snapshot data for potential resume. Path: %s", sharedPathToRemove)
@@ -628,7 +631,7 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 	}
 
 	cleanup := []string{}
-	
+
 	// Always clean up the original snapshots directory
 	snapshotDir := filepath.Join(o.root, "snapshots")
 	if fd, err := os.Open(snapshotDir); err == nil {
@@ -642,10 +645,11 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 			}
 		}
 	}
-	
+
 	// If using short paths, also clean up the short paths directory
 	if o.shortBasePaths {
-		shortSnapshotDir := "/s/l"
+		baseDir := filepath.Dir(o.root)
+		shortSnapshotDir := filepath.Join(baseDir, "l")
 		if fd, err := os.Open(shortSnapshotDir); err == nil {
 			defer fd.Close()
 			if dirs, err := fd.Readdirnames(0); err == nil {
@@ -730,14 +734,28 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		}
 		// Fallback to parent's UID/GID if not explicitly mapped and has parents
 		if (mappedUID == -1 || mappedGID == -1) && len(s.ParentIDs) > 0 {
-			// Stat parent's upper to get its ownership. Assumes parent is local.
-			// If parent could also be shared, this stat path needs to be determined correctly.
-			// For now, assume parent is local via o.root.
-			parentUpperForStat := o.getSnapshotFSPath(s.ParentIDs[0])
-			st, statErr := os.Stat(parentUpperForStat)
-			if statErr != nil {
-				return fmt.Errorf("failed to stat parent %s for UID/GID: %w", s.ParentIDs[0], statErr)
+			// Try to find parent snapshot in multiple locations to handle path transitions
+			parentID := s.ParentIDs[0]
+			var parentUpperForStat string
+			var st os.FileInfo
+			var statErr error
+
+			// First try the short path if enabled
+			if o.shortBasePaths {
+				parentUpperForStat = o.getSnapshotFSPath(parentID)
+				st, statErr = os.Stat(parentUpperForStat)
 			}
+
+			// If short path failed or not enabled, try the original path
+			if statErr != nil {
+				parentUpperForStat = filepath.Join(o.root, "snapshots", parentID, "fs")
+				st, statErr = os.Stat(parentUpperForStat)
+			}
+
+			if statErr != nil {
+				return fmt.Errorf("failed to stat parent %s for UID/GID (tried both short and original paths): %w", parentID, statErr)
+			}
+
 			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
 				mappedUID = int(stat.Uid)
 				mappedGID = int(stat.Gid)
@@ -781,7 +799,7 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 					return fmt.Errorf("failed to chown shared upperdir %s: %w", targetUpperPath, err)
 				}
 			}
-			// Ensure local snapshot ID marker directory exists  
+			// Ensure local snapshot ID marker directory exists
 			ensureLocalSnapshotIDDir := o.getSnapshotPath(s.ID)
 			if _, errStat := os.Stat(ensureLocalSnapshotIDDir); os.IsNotExist(errStat) {
 				if errMk := os.Mkdir(ensureLocalSnapshotIDDir, 0700); errMk != nil {
@@ -884,10 +902,21 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 			fmt.Sprintf("upperdir=%s", actualUpperPath),
 		)
 	} else if len(s.ParentIDs) == 1 && s.Kind == snapshots.KindView {
-		// View of a single committed layer. Assume parent is local.
-		// determineUpperPath for parent (if it had no special labels) would return local path.
-		// To be fully robust, we'd need parentInfo here. For now, assume parent is local.
-		parentUpperPath := o.getSnapshotFSPath(s.ParentIDs[0])
+		// View of a single committed layer. Try to find parent in multiple locations.
+		parentID := s.ParentIDs[0]
+		var parentUpperPath string
+
+		// First try the short path if enabled
+		if o.shortBasePaths {
+			parentUpperPath = o.getSnapshotFSPath(parentID)
+			if _, err := os.Stat(parentUpperPath); err != nil {
+				// If short path doesn't exist, try original path
+				parentUpperPath = filepath.Join(o.root, "snapshots", parentID, "fs")
+			}
+		} else {
+			parentUpperPath = o.getSnapshotFSPath(parentID)
+		}
+
 		return []mount.Mount{
 			{
 				Source: parentUpperPath,
@@ -902,63 +931,27 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 
 	parentPaths := make([]string, len(s.ParentIDs))
 	for i := range s.ParentIDs {
-		// Use the new path method for parent paths
-		parentPaths[i] = o.getSnapshotFSPath(s.ParentIDs[i])
+		// Try to find parent snapshot in multiple locations to handle path transitions
+		parentID := s.ParentIDs[i]
+		var parentPath string
+
+		// First try the short path if enabled
+		if o.shortBasePaths {
+			parentPath = o.getSnapshotFSPath(parentID)
+			if _, err := os.Stat(parentPath); err != nil {
+				// If short path doesn't exist, try original path
+				parentPath = filepath.Join(o.root, "snapshots", parentID, "fs")
+			}
+		} else {
+			parentPath = o.getSnapshotFSPath(parentID)
+		}
+
+		parentPaths[i] = parentPath
 	}
 
-	// Check if mount options would be too long and use symbolic links if needed
 	lowerdirOption := fmt.Sprintf("lowerdir=%s", strings.Join(parentPaths, ":"))
-	testOptions := append(options, lowerdirOption)
-	testOptions = append(testOptions, o.options...)
-	
-	// Calculate total mount options length (rough estimate)
-	totalLength := 0
-	for _, opt := range testOptions {
-		totalLength += len(opt) + 1 // +1 for comma separator
-	}
-	
-	log.L.WithField("snapshotID", s.ID).WithField("optionsLength", totalLength).WithField("layerCount", len(s.ParentIDs)).Debugf("Original mount options length: %d", totalLength)
-	
-	// Linux mount options limit is around 4096 bytes, use 3500 as safety margin
-	if totalLength > 3500 && len(s.ParentIDs) > 1 {
-		log.L.WithField("snapshotID", s.ID).WithField("optionsLength", totalLength).Debugf("Mount options too long")
-		
-		// For very large images (>50 layers), log a warning and use original behavior
-		// The Linux kernel has fundamental limits on mount option length
-		if len(s.ParentIDs) > 50 {
-			log.L.WithField("snapshotID", s.ID).WithField("layerCount", len(s.ParentIDs)).Warnf("Very large image detected (%d layers). This may exceed kernel mount option limits. Consider using smaller images or newer kernel versions.", len(s.ParentIDs))
-			
-			// Use original paths - let the kernel handle the limit
-			options = append(options, lowerdirOption)
-		} else {
-			// Use hybrid approach for smaller images (this works well)
-			log.L.WithField("snapshotID", s.ID).WithField("optionsLength", totalLength).Debugf("Mount options too long, using hybrid symbolic links")
-			hybridPaths, cleanup, err := o.createHybridLinks(s.ID, parentPaths)
-			if err != nil {
-				log.L.WithError(err).Warnf("Failed to create hybrid links for snapshot %s, using original paths", s.ID)
-				options = append(options, lowerdirOption)
-			} else {
-				if err := o.storeCleanupInfo(s.ID, cleanup); err != nil {
-					log.L.WithError(err).Warnf("Failed to store cleanup info for snapshot %s", s.ID)
-				}
-				hybridLowerdirOption := fmt.Sprintf("lowerdir=%s", strings.Join(hybridPaths, ":"))
-				
-				// Calculate new length with hybrid paths
-				hybridTestOptions := append(options, hybridLowerdirOption)
-				hybridTestOptions = append(hybridTestOptions, o.options...)
-				hybridTotalLength := 0
-				for _, opt := range hybridTestOptions {
-					hybridTotalLength += len(opt) + 1
-				}
-				
-				log.L.WithField("snapshotID", s.ID).WithField("originalLength", totalLength).WithField("hybridLength", hybridTotalLength).Debugf("Reduced mount options length from %d to %d", totalLength, hybridTotalLength)
-				options = append(options, hybridLowerdirOption)
-			}
-		}
-	} else {
-		options = append(options, lowerdirOption)
-	}
-	
+	options = append(options, lowerdirOption)
+
 	options = append(options, o.options...)
 
 	return []mount.Mount{
@@ -1040,198 +1033,28 @@ func (o *snapshotter) optimizePathsMinimal(paths []string) []string {
 	if len(paths) == 0 {
 		return paths
 	}
-	
+
 	// Try to find opportunities to shorten paths without breaking them
 	// This is a very conservative approach that maintains full filesystem integrity
-	
+
 	// Look for common long substrings we can abbreviate
 	optimizedPaths := make([]string, len(paths))
 	for i, path := range paths {
 		// Replace long common paths with shorter equivalents
 		optimized := path
-		
+
 		// Try to shorten the containerd root path
 		if strings.Contains(path, "/io.containerd.snapshotter.v1.overlayfs/") {
 			optimized = strings.Replace(optimized, "/io.containerd.snapshotter.v1.overlayfs/", "/ol/", 1)
 		}
-		
-		// Try to shorten "snapshots" to "s"
+
+		// Try to shorten "snapshots" to "l" (for local snapshots)
 		if strings.Contains(optimized, "/snapshots/") {
-			optimized = strings.Replace(optimized, "/snapshots/", "/s/", 1)
+			optimized = strings.Replace(optimized, "/snapshots/", "/l/", 1)
 		}
-		
+
 		optimizedPaths[i] = optimized
 	}
-	
+
 	return optimizedPaths
-}
-
-// createHybridLinks creates a hybrid approach: preserve critical layers (especially base layers)
-// and use short symbolic links for middle layers to reduce mount option length while
-// ensuring essential directories like /dev, /bin, /etc are properly accessible
-func (o *snapshotter) createHybridLinks(snapshotID string, parentPaths []string) ([]string, string, error) {
-
-	// Use a much shorter base path for links - use /tmp for maximum brevity
-	// Create a unique but short directory name using hash of snapshot ID
-	shortHash := hashString(snapshotID)[:8]
-	linksDir := filepath.Join("/tmp", "ol", shortHash)
-	
-	// Strategy: Keep the first few and last few layers as real paths (they often contain critical system directories)
-	// Use symbolic links for middle layers that are typically application-specific
-	
-	numLayers := len(parentPaths)
-	preserveFirst := 5  // Keep first 5 layers (base OS layers with /dev, /bin, /etc)
-	preserveLast := 3   // Keep last 3 layers (recent changes)
-	
-	// Adjust preservation counts based on total layers
-	if numLayers <= 10 {
-		preserveFirst = 3
-		preserveLast = 2
-	} else if numLayers <= 20 {
-		preserveFirst = 4
-		preserveLast = 3
-	} else if numLayers <= 40 {
-		preserveFirst = 5
-		preserveLast = 3
-	} else {
-		// For very large images (like 61 layers), be VERY conservative with preservation
-		// to ensure device mounting works correctly
-		preserveFirst = 15  // Preserve first 15 layers (critical base system)
-		preserveLast = 10   // Preserve last 10 layers (recent changes)
-	}
-	
-	// Ensure we don't preserve more than we have
-	if preserveFirst + preserveLast >= numLayers {
-		preserveFirst = numLayers / 2
-		preserveLast = numLayers - preserveFirst
-	}
-	
-	log.L.WithField("snapshotID", snapshotID).WithField("totalLayers", numLayers).WithField("preserveFirst", preserveFirst).WithField("preserveLast", preserveLast).Debugf("Using hybrid approach")
-	
-	// Check if links directory already exists (concurrent access)
-	if _, err := os.Stat(linksDir); err == nil {
-		// Directory already exists, verify and reuse if possible
-		hybridPaths := make([]string, numLayers)
-		allLinksValid := true
-		
-		// Copy preserved layers as-is
-		for i := 0; i < preserveFirst; i++ {
-			hybridPaths[i] = parentPaths[i]
-		}
-		for i := numLayers - preserveLast; i < numLayers; i++ {
-			hybridPaths[i] = parentPaths[i]
-		}
-		
-		// Check symbolic links for middle layers
-		for i := preserveFirst; i < numLayers - preserveLast; i++ {
-			linkName := "l" + strconv.Itoa(i)
-			linkPath := filepath.Join(linksDir, linkName)
-			
-			// Check if link exists and points to correct target
-			if target, err := os.Readlink(linkPath); err != nil || target != parentPaths[i] {
-				allLinksValid = false
-				break
-			}
-			hybridPaths[i] = linkPath
-		}
-		
-		if allLinksValid {
-			log.L.WithField("snapshotID", snapshotID).Debugf("Reusing existing hybrid links")
-			return hybridPaths, linksDir, nil
-		}
-		
-		// Links don't match, remove directory and recreate
-		os.RemoveAll(linksDir)
-	}
-	
-	// Create directory for symbolic links
-	if err := os.MkdirAll(linksDir, 0755); err != nil {
-		return nil, "", fmt.Errorf("failed to create links directory: %w", err)
-	}
-
-	hybridPaths := make([]string, numLayers)
-	
-	// Copy preserved layers as-is (these contain critical system directories)
-	for i := 0; i < preserveFirst; i++ {
-		hybridPaths[i] = parentPaths[i]
-	}
-	for i := numLayers - preserveLast; i < numLayers; i++ {
-		hybridPaths[i] = parentPaths[i]
-	}
-	
-	// Create symbolic links for middle layers
-	for i := preserveFirst; i < numLayers - preserveLast; i++ {
-		linkName := "l" + strconv.Itoa(i)
-		linkPath := filepath.Join(linksDir, linkName)
-		
-		// Remove existing link if it exists (handle race condition)
-		os.Remove(linkPath)
-		
-		// Create symbolic link pointing to the actual parent path
-		if err := os.Symlink(parentPaths[i], linkPath); err != nil {
-			// Cleanup on error
-			os.RemoveAll(linksDir)
-			return nil, "", fmt.Errorf("failed to create symbolic link %s -> %s: %w", linkPath, parentPaths[i], err)
-		}
-		
-		hybridPaths[i] = linkPath
-	}
-	
-	log.L.WithField("snapshotID", snapshotID).WithField("linksDir", linksDir).WithField("linkedLayers", numLayers - preserveFirst - preserveLast).Debugf("Created hybrid links")
-	return hybridPaths, linksDir, nil
-}
-
-// storeCleanupInfo stores cleanup information for later use during snapshot removal
-func (o *snapshotter) storeCleanupInfo(snapshotID, linksDir string) error {
-	// Create a simple marker file to track which snapshots have links
-	cleanupInfoDir := filepath.Join(o.root, "links-cleanup")
-	if err := os.MkdirAll(cleanupInfoDir, 0755); err != nil {
-		return fmt.Errorf("failed to create cleanup info directory: %w", err)
-	}
-	
-	cleanupFile := filepath.Join(cleanupInfoDir, snapshotID)
-	if err := os.WriteFile(cleanupFile, []byte(linksDir), 0644); err != nil {
-		return fmt.Errorf("failed to write cleanup info: %w", err)
-	}
-	
-	return nil
-}
-
-// cleanupShortLinks removes the symbolic links directory for a snapshot
-func (o *snapshotter) cleanupShortLinks(snapshotID string) error {
-	// Check if there's cleanup info for this snapshot
-	cleanupFile := filepath.Join(o.root, "links-cleanup", snapshotID)
-	linksDir, err := os.ReadFile(cleanupFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No links to cleanup for this snapshot, but also try the new location
-			shortHash := hashString(snapshotID)[:8]
-			newLinksDir := filepath.Join("/tmp", "ol", shortHash)
-			if err := os.RemoveAll(newLinksDir); err != nil {
-				log.L.WithError(err).Debugf("Failed to remove new-style links directory %s", newLinksDir)
-			}
-			return nil
-		}
-		return fmt.Errorf("failed to read cleanup info: %w", err)
-	}
-	
-	// Remove the links directory
-	if err := os.RemoveAll(string(linksDir)); err != nil {
-		log.L.WithError(err).Warnf("Failed to remove links directory %s", string(linksDir))
-	}
-	
-	// Also try to remove the new-style directory as a fallback
-	shortHash := hashString(snapshotID)[:8]
-	newLinksDir := filepath.Join("/tmp", "ol", shortHash)
-	if err := os.RemoveAll(newLinksDir); err != nil {
-		log.L.WithError(err).Debugf("Failed to remove new-style links directory %s", newLinksDir)
-	}
-	
-	// Remove the cleanup info file
-	if err := os.Remove(cleanupFile); err != nil {
-		log.L.WithError(err).Warnf("Failed to remove cleanup info file %s", cleanupFile)
-	}
-	
-	log.L.WithField("snapshotID", snapshotID).Debugf("Cleaned up short links")
-	return nil
 }
