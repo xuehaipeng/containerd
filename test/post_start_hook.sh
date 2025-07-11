@@ -2,10 +2,11 @@
 set -x # Enable command tracing for debugging
 
 # Post-Start Hook Script for Hash-Based Shared Snapshot Session Management
-# This script handles migration of data from previous sessions to the current session
+# This script uses the path mappings file to discover current session info
 
 LOG_FILE="/tmp/poststart.log"
 LOCK_FILE="/tmp/poststart.lock"
+PATH_MAPPINGS_FILE="/path-mappings.json"
 
 # Function to log messages
 log() {
@@ -38,39 +39,97 @@ log "Using shell: sh (POSIX-compliant)"
 echo "POST-START HOOK RUNNING" >&1
 echo "POST-START HOOK RUNNING" >&2
 
-# Determine own upperdir from mount info
-MY_OWN_UPPERDIR_HOST_PATH=$(awk '/overlay/ && /upperdir=/ { 
-  # Find the field containing upperdir=
-  for (i=1; i<=NF; i++) { 
-    if ($i ~ /upperdir=/) { 
-      # Extract everything after upperdir= and before the next comma
-      temp = $i
-      gsub(/.*upperdir=/, "", temp)
-      gsub(/,.*/, "", temp)
-      if (temp != "") {
-        print temp
-        exit
-      }
-    } 
-  } 
-}' /proc/self/mountinfo)
+# Get current pod information from environment or defaults
+CURRENT_NAMESPACE="${CURRENT_NAMESPACE:-default}"
+CURRENT_POD_NAME="${HOSTNAME:-nb-test-0}"
+CURRENT_CONTAINER_NAME="${CURRENT_CONTAINER_NAME:-pytorch}"
 
-log "Raw mount info:"
-cat /proc/self/mountinfo | grep overlay >> "$LOG_FILE" 2>&1
-log "Extracted upperdir: '$MY_OWN_UPPERDIR_HOST_PATH'"
+log "Current pod info: namespace=$CURRENT_NAMESPACE, pod=$CURRENT_POD_NAME, container=$CURRENT_CONTAINER_NAME"
 
-if [ -z "$MY_OWN_UPPERDIR_HOST_PATH" ]; then
-    log "ERROR: Could not determine own shared upperdir. Proceeding with empty session."
+# Read path mappings file to find our current session
+if [ ! -f "$PATH_MAPPINGS_FILE" ]; then
+    log "ERROR: Path mappings file not found: $PATH_MAPPINGS_FILE"
+    log "Starting with fresh session."
     exit 0
 fi
 
-log "Current upperdir: $MY_OWN_UPPERDIR_HOST_PATH"
+log "Reading path mappings from: $PATH_MAPPINGS_FILE"
 
-# Parse the hash-based path structure: /s/{pod_hash}/{snapshot_hash}/fs
-MY_OWN_SNAPSHOT_HASH=$(basename "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")
-MY_POD_HASH=$(basename "$(dirname "$(dirname "$MY_OWN_UPPERDIR_HOST_PATH")")")
-log "Current pod hash: $MY_POD_HASH"
-log "Current snapshot hash: $MY_OWN_SNAPSHOT_HASH"
+# Extract our current session info using awk (more portable than jq)
+CURRENT_MAPPING=$(awk -v ns="$CURRENT_NAMESPACE" -v pod="$CURRENT_POD_NAME" -v container="$CURRENT_CONTAINER_NAME" '
+BEGIN { 
+    found = 0
+    latest_time = ""
+    latest_path = ""
+    latest_pod_hash = ""
+    latest_snapshot_hash = ""
+}
+/"mappings"/ { in_mappings = 1; next }
+in_mappings && /"[^"]+": {/ {
+    # Extract the path key (e.g., "6fb76255/7ed8f0f3")
+    gsub(/.*"/, "", $0)
+    gsub(/": {.*/, "", $0)
+    current_path = $0
+    in_entry = 1
+    next
+}
+in_entry && /"namespace":/ {
+    gsub(/.*"namespace": "/, "", $0)
+    gsub(/".*/, "", $0)
+    entry_namespace = $0
+}
+in_entry && /"pod_name":/ {
+    gsub(/.*"pod_name": "/, "", $0)
+    gsub(/".*/, "", $0)
+    entry_pod = $0
+}
+in_entry && /"container_name":/ {
+    gsub(/.*"container_name": "/, "", $0)
+    gsub(/".*/, "", $0)
+    entry_container = $0
+}
+in_entry && /"created_at":/ {
+    gsub(/.*"created_at": "/, "", $0)
+    gsub(/".*/, "", $0)
+    entry_time = $0
+}
+in_entry && /}/ {
+    # End of entry, check if it matches our pod
+    if (entry_namespace == ns && entry_pod == pod && entry_container == container) {
+        if (entry_time > latest_time) {
+            latest_time = entry_time
+            latest_path = current_path
+            split(current_path, parts, "/")
+            latest_pod_hash = parts[1]
+            latest_snapshot_hash = parts[2]
+            found = 1
+        }
+    }
+    in_entry = 0
+    entry_namespace = ""
+    entry_pod = ""
+    entry_container = ""
+    entry_time = ""
+}
+END {
+    if (found) {
+        print latest_pod_hash ":" latest_snapshot_hash ":" latest_path
+    }
+}
+' "$PATH_MAPPINGS_FILE")
+
+if [ -z "$CURRENT_MAPPING" ]; then
+    log "ERROR: Could not find current session in path mappings file"
+    log "Starting with fresh session."
+    exit 0
+fi
+
+# Parse the result
+MY_POD_HASH=$(echo "$CURRENT_MAPPING" | cut -d: -f1)
+MY_OWN_SNAPSHOT_HASH=$(echo "$CURRENT_MAPPING" | cut -d: -f2)
+CURRENT_PATH=$(echo "$CURRENT_MAPPING" | cut -d: -f3)
+
+log "Found current session: pod_hash=$MY_POD_HASH, snapshot_hash=$MY_OWN_SNAPSHOT_HASH, path=$CURRENT_PATH"
 
 # The base path for all sessions, as seen INSIDE the container
 CONTAINER_SESSIONS_PATH="/sessions"

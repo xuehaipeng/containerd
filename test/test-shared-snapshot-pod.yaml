@@ -52,6 +52,9 @@ spec:
           readOnly: true
         - name: sessions
           mountPath: /sessions
+        - name: path-mappings
+          mountPath: /path-mappings.json
+          readOnly: true
         lifecycle:
           postStart:
             exec:
@@ -66,3 +69,8 @@ spec:
           # Maps to shared storage base - hash-based structure: /s/{pod_hash}/{snapshot_hash}/
           path: /s
           type: Directory
+      - name: path-mappings
+        hostPath:
+          # Path mappings file for discovering pod hash and snapshot hash
+          path: /s/.path-mappings.json
+          type: File
