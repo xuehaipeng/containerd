@@ -48,6 +48,9 @@ type Config struct {
 
 	// MountOptions are options used for the overlay mount (not used on bind mounts)
 	MountOptions []string `toml:"mount_options"`
+	
+	// ShortBasePaths enables short base paths for mount options optimization
+	ShortBasePaths bool `toml:"short_base_paths"`
 }
 
 func init() {
@@ -90,6 +93,10 @@ func init() {
 				// If slowChown is false, we use capaOnlyRemapIDs to signal we only
 				// allow idmap mounts.
 				ic.Meta.Capabilities = append(ic.Meta.Capabilities, capaOnlyRemapIDs)
+			}
+
+			if config.ShortBasePaths {
+				oOpts = append(oOpts, overlay.WithShortBasePaths)
 			}
 
 			ic.Meta.Exports[plugins.SnapshotterRootDir] = root
