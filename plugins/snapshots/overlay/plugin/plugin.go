@@ -48,7 +48,7 @@ type Config struct {
 
 	// MountOptions are options used for the overlay mount (not used on bind mounts)
 	MountOptions []string `toml:"mount_options"`
-	
+
 	// ShortBasePaths enables short base paths for mount options optimization
 	ShortBasePaths bool `toml:"short_base_paths"`
 }

@@ -1,5 +1,3 @@
-# This is a minimal containerd configuration for Kubernetes
-# Generated for containerd v2.1.x
 disabled_plugins = []
 imports = []
 oom_score = 0
@@ -51,9 +49,6 @@ version = 3
 
     [plugins."io.containerd.cri.v1.images".registry]
       config_path = "/etc/containerd/certs.d"
-
-
-
       [plugins."io.containerd.cri.v1.images".registry.configs]
 
     [plugins."io.containerd.cri.v1.images".image_decryption]
@@ -78,8 +73,8 @@ version = 3
     cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
     drain_exec_sync_io_timeout = "0s"
     ignore_deprecation_warnings = []
-    shared_snapshot_path = "/tecofs/notebook-pods"
-    shared_snapshot_namespace_regex = "^kubecube-.*"
+    shared_snapshot_path = "/s"
+    shared_snapshot_namespace_regex = "default"
     shared_snapshot_pod_name_regex = "^nb-.*"
 
     [plugins."io.containerd.cri.v1.runtime".containerd]

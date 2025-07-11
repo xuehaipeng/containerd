@@ -62,10 +62,10 @@ func initPathMappings() {
 // RegisterPathMapping saves a mapping between hash-based paths and original identifiers
 func RegisterPathMapping(basePath, podHash, snapshotHash, namespace, podName, containerName, snapshotID string) error {
 	mappingOnce.Do(initPathMappings)
-	
+
 	globalMappings.mu.Lock()
 	defer globalMappings.mu.Unlock()
-	
+
 	key := fmt.Sprintf("%s/%s", podHash, snapshotHash)
 	globalMappings.Mappings[key] = &PathMapping{
 		PodHash:       podHash,
@@ -77,7 +77,7 @@ func RegisterPathMapping(basePath, podHash, snapshotHash, namespace, podName, co
 		CreatedAt:     time.Now(),
 		LastAccessed:  time.Now(),
 	}
-	
+
 	// Save to file
 	return savePathMappings(basePath)
 }
@@ -85,29 +85,29 @@ func RegisterPathMapping(basePath, podHash, snapshotHash, namespace, podName, co
 // savePathMappings persists the mappings to disk
 func savePathMappings(basePath string) error {
 	mappingFilePath := filepath.Join(basePath, pathMappingFile)
-	
+
 	// Ensure directory exists
 	dir := filepath.Dir(mappingFilePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory for path mappings: %w", err)
 	}
-	
+
 	data, err := json.MarshalIndent(globalMappings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal path mappings: %w", err)
 	}
-	
+
 	// Write atomically
 	tmpFile := mappingFilePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write path mappings: %w", err)
 	}
-	
+
 	if err := os.Rename(tmpFile, mappingFilePath); err != nil {
 		os.Remove(tmpFile) // Clean up on error
 		return fmt.Errorf("failed to rename path mappings file: %w", err)
 	}
-	
+
 	log.L.Debugf("Saved path mapping to %s", mappingFilePath)
 	return nil
 }
@@ -115,9 +115,9 @@ func savePathMappings(basePath string) error {
 // LoadPathMappings loads mappings from disk
 func LoadPathMappings(basePath string) error {
 	mappingOnce.Do(initPathMappings)
-	
+
 	mappingFilePath := filepath.Join(basePath, pathMappingFile)
-	
+
 	data, err := os.ReadFile(mappingFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -126,24 +126,24 @@ func LoadPathMappings(basePath string) error {
 		}
 		return fmt.Errorf("failed to read path mappings: %w", err)
 	}
-	
+
 	globalMappings.mu.Lock()
 	defer globalMappings.mu.Unlock()
-	
+
 	if err := json.Unmarshal(data, globalMappings); err != nil {
 		return fmt.Errorf("failed to unmarshal path mappings: %w", err)
 	}
-	
+
 	return nil
 }
 
 // LookupPathMapping finds a mapping by hash-based path
 func LookupPathMapping(podHash, snapshotHash string) (*PathMapping, bool) {
 	mappingOnce.Do(initPathMappings)
-	
+
 	globalMappings.mu.RLock()
 	defer globalMappings.mu.RUnlock()
-	
+
 	key := fmt.Sprintf("%s/%s", podHash, snapshotHash)
 	mapping, ok := globalMappings.Mappings[key]
 	if ok {
@@ -156,10 +156,10 @@ func LookupPathMapping(podHash, snapshotHash string) (*PathMapping, bool) {
 // GetAllMappings returns a copy of all mappings
 func GetAllMappings() map[string]*PathMapping {
 	mappingOnce.Do(initPathMappings)
-	
+
 	globalMappings.mu.RLock()
 	defer globalMappings.mu.RUnlock()
-	
+
 	// Create a copy to avoid race conditions
 	result := make(map[string]*PathMapping)
 	for k, v := range globalMappings.Mappings {
@@ -173,24 +173,75 @@ func GetAllMappings() map[string]*PathMapping {
 // CleanupStaleMappings removes mappings older than the specified duration
 func CleanupStaleMappings(basePath string, maxAge time.Duration) error {
 	mappingOnce.Do(initPathMappings)
-	
+
 	globalMappings.mu.Lock()
 	defer globalMappings.mu.Unlock()
-	
+
 	now := time.Now()
 	removed := 0
-	
+
 	for key, mapping := range globalMappings.Mappings {
 		if now.Sub(mapping.LastAccessed) > maxAge {
 			delete(globalMappings.Mappings, key)
 			removed++
 		}
 	}
-	
+
 	if removed > 0 {
 		log.L.Infof("Cleaned up %d stale path mappings", removed)
 		return savePathMappings(basePath)
 	}
-	
+
 	return nil
-} 
+}
+
+// FindPreviousMappings finds all previous mappings for the same pod identity
+// This can be used by containers to discover previous state directories
+func FindPreviousMappings(namespace, podName, containerName string) ([]*PathMapping, error) {
+	mappingOnce.Do(initPathMappings)
+
+	globalMappings.mu.RLock()
+	defer globalMappings.mu.RUnlock()
+
+	var previousMappings []*PathMapping
+
+	for _, mapping := range globalMappings.Mappings {
+		if mapping.Namespace == namespace &&
+			mapping.PodName == podName &&
+			mapping.ContainerName == containerName {
+			// Create a copy to avoid race conditions
+			mappingCopy := *mapping
+			previousMappings = append(previousMappings, &mappingCopy)
+		}
+	}
+
+	// Sort by creation time (newest first)
+	for i := 0; i < len(previousMappings)-1; i++ {
+		for j := i + 1; j < len(previousMappings); j++ {
+			if previousMappings[i].CreatedAt.Before(previousMappings[j].CreatedAt) {
+				previousMappings[i], previousMappings[j] = previousMappings[j], previousMappings[i]
+			}
+		}
+	}
+
+	return previousMappings, nil
+}
+
+// GetPreviousStateDirectories returns paths to previous state directories for the same pod
+func GetPreviousStateDirectories(basePath, namespace, podName, containerName string) ([]string, error) {
+	previousMappings, err := FindPreviousMappings(namespace, podName, containerName)
+	if err != nil {
+		return nil, err
+	}
+
+	var directories []string
+	for _, mapping := range previousMappings {
+		dirPath := filepath.Join(basePath, mapping.PodHash, mapping.SnapshotHash, "fs")
+		// Check if directory exists
+		if _, err := os.Stat(dirPath); err == nil {
+			directories = append(directories, dirPath)
+		}
+	}
+
+	return directories, nil
+}

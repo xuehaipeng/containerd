@@ -166,12 +166,11 @@ We have successfully implemented and deployed a comprehensive solution for the o
 4. **Short Path Structure**: Uses `/s/l/` for snapshot paths instead of long containerd paths:
    - Short paths: `/s/l/143/fs` instead of `/s/d/io.containerd.snapshotter.v1.overlayfs/snapshots/143/fs`
    - Shared storage: `/s/{pod_hash}/{snapshot_hash}/fs` for container state
-   - **Critical fix applied**: Corrected path calculation to use proper shared storage base
+
 
 5. **Robust Parent Path Resolution**: Handles transitions between path configurations:
    - Tries current path method first, then fallback to opposite method
    - Handles existing snapshots during configuration changes
-   - **Bug fixed**: Parent path resolution now correctly finds snapshots in `/s/l/`
 
 6. **Configuration Support**: Added plugin configuration options:
    - `short_base_paths` configuration flag

@@ -1,87 +1,66 @@
+# --- Headless Service for the StatefulSet (Required) ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nb-test
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: nb-test
+
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: test-shared-snapshot-mysql
+  name: nb-test
   namespace: default
 spec:
-  serviceName: "mysql"
   replicas: 1
   selector:
     matchLabels:
-      app: test-shared-snapshot-mysql
+      app: nb-test
+  serviceName: "nb-test"
   template:
     metadata:
       labels:
-        app: test-shared-snapshot-mysql
+        app: nb-test
+        tenant_id: "1"
     spec:
+      # Using hash-based shared snapshots - should now work with large images!
+      nodeSelector:
+        kubernetes.io/hostname: n-d-master1
       containers:
-      - name: mysql
-        image: business.tecorigin.io:5443/kubeflow/docker.io/library/mysql:8.0.29
+      - name: pytorch
+        image: business1.tecorigin.io:5443/teco_gallery/nvidia/pytorch:24.12-py3
+        command: ["sleep", "99999"]
+        workingDir: /
         env:
-        - name: MYSQL_ALLOW_EMPTY_PASSWORD
-          value: "true"
-        lifecycle:
-          postStart:
-            exec:
-              command:
-                - "/bin/sh"
-                - "/scripts/post_start_hook.sh"
-        # Adding a simple command to ensure it writes some data and keeps running
-        # MySQL will initialize its data directory on first start.
-        # We'll also write a test file to a common location.
-        command:
-          - "/bin/sh"
-          - "-c"
-          - |
-            echo "Test file in shared upperdir" > /tmp/my_test_file.txt
-            datadir="$(mysqld --verbose --help 2>/dev/null | awk '$1 == "datadir" { print $2 }')"
-            echo "MySQL data directory will be: ${datadir}"
-            # Ensure the entrypoint script is executable if it isn't already
-            chmod +x /usr/local/bin/docker-entrypoint.sh
-            # Start MySQL in the background to allow it to initialize
-            echo "Starting MySQL in background..."
-            /usr/local/bin/docker-entrypoint.sh mysqld & mysqld_pid=$!
-            echo "Waiting for MySQL to initialize (approx 30 seconds)..."
-            sleep 30
-            # Create a marker file after MySQL has had some time to initialize its directory
-            if [ -d "${datadir}" ]; then
-              echo "Creating marker file in ${datadir}/containerd_test_marker.txt"
-              echo "This is a test marker file." > "${datadir}/containerd_test_marker.txt"
-            else
-              echo "MySQL data directory ${datadir} not found after startup."
-            fi
-            echo "MySQL started. Container will sleep for 10 minutes for inspection."
-            echo "To stop, manually delete the pod or exec into it and kill PID $mysqld_pid or this script (PID $$)."
-            # Keep the container running by waiting on the backgrounded MySQL process
-            # If mysqld exits, this script will also exit.
-            # Alternatively, a long sleep can be used if direct process waiting is problematic.
-            # wait $mysqld_pid 
-            # Using sleep as a simpler way to keep alive for inspection for a fixed time
-            sleep 900 
-            echo "Stopping MySQL..."
-            kill $mysqld_pid
-            wait $mysqld_pid 2>/dev/null || true
-            echo "Exiting test script."
-        # It's good practice to define resource requests/limits
+        - name: TZ
+          value: "Asia/Shanghai"
         resources:
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
           requests:
-            memory: "256Mi"
-            cpu: "250m"
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
         volumeMounts:
-        - name: shared-storage
-          mountPath: /nvme1
         - name: scripts
           mountPath: /scripts
           readOnly: true
+        - name: sessions
+          mountPath: /sessions
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "/scripts/post_start_hook.sh"]
       volumes:
-      - name: shared-storage
-        hostPath:
-          path: /nvme1
-          type: Directory
       - name: scripts
         hostPath:
-          path: /nvme1
-          type: Directory 
+          path: /tecofs/notebook-pods/scripts
+          type: Directory
+      - name: sessions
+        hostPath:
+          path: /data/s
+          type: Directory
