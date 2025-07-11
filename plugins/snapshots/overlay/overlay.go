@@ -740,15 +740,20 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			var st os.FileInfo
 			var statErr error
 
-			// First try the short path if enabled
-			if o.shortBasePaths {
-				parentUpperForStat = o.getSnapshotFSPath(parentID)
-				st, statErr = os.Stat(parentUpperForStat)
-			}
+			// First try the current path method (short or original based on config)
+			parentUpperForStat = o.getSnapshotFSPath(parentID)
+			st, statErr = os.Stat(parentUpperForStat)
 
-			// If short path failed or not enabled, try the original path
+			// If that failed, try the opposite path method
 			if statErr != nil {
-				parentUpperForStat = filepath.Join(o.root, "snapshots", parentID, "fs")
+				if o.shortBasePaths {
+					// If short paths are enabled but failed, try original path
+					parentUpperForStat = filepath.Join(o.root, "snapshots", parentID, "fs")
+				} else {
+					// If original paths are enabled but failed, try short path
+					baseDir := filepath.Dir(o.root)
+					parentUpperForStat = filepath.Join(baseDir, "l", parentID, "fs")
+				}
 				st, statErr = os.Stat(parentUpperForStat)
 			}
 
@@ -904,17 +909,19 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 	} else if len(s.ParentIDs) == 1 && s.Kind == snapshots.KindView {
 		// View of a single committed layer. Try to find parent in multiple locations.
 		parentID := s.ParentIDs[0]
-		var parentUpperPath string
 
-		// First try the short path if enabled
-		if o.shortBasePaths {
-			parentUpperPath = o.getSnapshotFSPath(parentID)
-			if _, err := os.Stat(parentUpperPath); err != nil {
-				// If short path doesn't exist, try original path
+		// First try the current path method (short or original based on config)
+		parentUpperPath := o.getSnapshotFSPath(parentID)
+		if _, err := os.Stat(parentUpperPath); err != nil {
+			// If that failed, try the opposite path method
+			if o.shortBasePaths {
+				// If short paths are enabled but failed, try original path
 				parentUpperPath = filepath.Join(o.root, "snapshots", parentID, "fs")
+			} else {
+				// If original paths are enabled but failed, try short path
+				baseDir := filepath.Dir(o.root)
+				parentUpperPath = filepath.Join(baseDir, "l", parentID, "fs")
 			}
-		} else {
-			parentUpperPath = o.getSnapshotFSPath(parentID)
 		}
 
 		return []mount.Mount{
@@ -933,17 +940,19 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 	for i := range s.ParentIDs {
 		// Try to find parent snapshot in multiple locations to handle path transitions
 		parentID := s.ParentIDs[i]
-		var parentPath string
 
-		// First try the short path if enabled
-		if o.shortBasePaths {
-			parentPath = o.getSnapshotFSPath(parentID)
-			if _, err := os.Stat(parentPath); err != nil {
-				// If short path doesn't exist, try original path
+		// First try the current path method (short or original based on config)
+		parentPath := o.getSnapshotFSPath(parentID)
+		if _, err := os.Stat(parentPath); err != nil {
+			// If that failed, try the opposite path method
+			if o.shortBasePaths {
+				// If short paths are enabled but failed, try original path
 				parentPath = filepath.Join(o.root, "snapshots", parentID, "fs")
+			} else {
+				// If original paths are enabled but failed, try short path
+				baseDir := filepath.Dir(o.root)
+				parentPath = filepath.Join(baseDir, "l", parentID, "fs")
 			}
-		} else {
-			parentPath = o.getSnapshotFSPath(parentID)
 		}
 
 		parentPaths[i] = parentPath
