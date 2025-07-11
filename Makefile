@@ -38,8 +38,8 @@ PACKAGE=github.com/containerd/containerd/v2
 SHIM_CGO_ENABLED ?= 0
 
 ifneq "$(strip $(shell command -v $(GO) 2>/dev/null))" ""
-	GOOS ?= $(shell $(GO) env GOOS)
-	GOARCH ?= $(shell $(GO) env GOARCH)
+	GOOS ?= linux
+	GOARCH ?= amd64
 else
 	ifeq ($(GOOS),)
 		# approximate GOOS for the platform if we don't have Go and GOOS isn't

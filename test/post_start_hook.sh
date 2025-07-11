@@ -80,21 +80,59 @@ PREVIOUS_SNAPSHOT_PATH=""
 
 if [ -d "$CONTAINER_SESSIONS_PATH" ]; then
     log "Scanning for a non-empty previous session to restore..."
-    # Use find for robustness, especially on network filesystems
+    # Handle both old flat structure and new hash-based nested structure
+    
+    # First, try to find sessions in hash-based subdirectories (new structure)
+    for HASH_DIR in "$CONTAINER_SESSIONS_PATH"/* ; do
+        if [ -d "$HASH_DIR" ] && [ "$(basename "$HASH_DIR")" != "default" ]; then
+            # This looks like a hash-based directory, scan for sessions inside it
+            for D_CONTAINER_PATH in "$HASH_DIR"/* ; do
+                if [ -d "${D_CONTAINER_PATH}/fs" ]; then
+                    SNAP_ID=$(basename "$D_CONTAINER_PATH")
+                    if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
+                        # Check if directory has content
+                        if [ -n "$(find "${D_CONTAINER_PATH}/fs" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+                            log "Found candidate non-empty session in hash structure: $SNAP_ID. Will use this one unless a newer one is found."
+                            PREVIOUS_SNAPSHOT_ID=$SNAP_ID
+                            PREVIOUS_SNAPSHOT_PATH="${D_CONTAINER_PATH}/fs"
+                        fi
+                    fi
+                fi
+            done
+        fi
+    done
+    
+    # If no hash-based session found, try the old flat structure (for backward compatibility)
+    if [ -z "$PREVIOUS_SNAPSHOT_ID" ]; then
     for D_CONTAINER_PATH in "$CONTAINER_SESSIONS_PATH"/* ; do
         if [ -d "${D_CONTAINER_PATH}/fs" ]; then
             SNAP_ID=$(basename "$D_CONTAINER_PATH")
             if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
-                # Check if directory has content. find is more reliable than ls.
+                    # Check if directory has content
                 if [ -n "$(find "${D_CONTAINER_PATH}/fs" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-                    log "Found candidate non-empty session: $SNAP_ID. Will use this one unless a newer one is found."
+                        log "Found candidate non-empty session in flat structure: $SNAP_ID. Will use this one unless a newer one is found."
                     PREVIOUS_SNAPSHOT_ID=$SNAP_ID
-                    # The source path for rsync must be the container path
                     PREVIOUS_SNAPSHOT_PATH="${D_CONTAINER_PATH}/fs"
                 fi
             fi
         fi
     done
+    fi
+    
+    # Also check the old named structure under /sessions/default/ (legacy support)
+    if [ -d "$CONTAINER_SESSIONS_PATH/default" ]; then
+        for POD_DIR in "$CONTAINER_SESSIONS_PATH/default"/* ; do
+            if [ -d "$POD_DIR" ] && [ -d "${POD_DIR}/fs" ]; then
+                # Check if directory has content
+                if [ -n "$(find "${POD_DIR}/fs" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+                    POD_NAME=$(basename "$POD_DIR")
+                    log "Found candidate non-empty session in legacy structure: $POD_NAME"
+                    PREVIOUS_SNAPSHOT_ID="legacy-$POD_NAME"
+                    PREVIOUS_SNAPSHOT_PATH="${POD_DIR}/fs"
+                fi
+            fi
+        done
+    fi
 fi
 
 # Restore from previous session if found
@@ -130,13 +168,15 @@ fi
 log "=== Cleaning up ALL other session directories ==="
 CLEANUP_COUNT=0
 if [ -d "$CONTAINER_SESSIONS_PATH" ]; then
-    for D_CONTAINER_PATH in "$CONTAINER_SESSIONS_PATH"/* ; do
-        # Check if it's a directory, to avoid errors with non-directory files
+    # Clean up sessions in hash-based subdirectories (new structure)
+    for HASH_DIR in "$CONTAINER_SESSIONS_PATH"/* ; do
+        if [ -d "$HASH_DIR" ] && [ "$(basename "$HASH_DIR")" != "default" ]; then
+            # This looks like a hash-based directory, clean up sessions inside it
+            for D_CONTAINER_PATH in "$HASH_DIR"/* ; do
         if [ -d "$D_CONTAINER_PATH" ]; then
             SNAP_ID=$(basename "$D_CONTAINER_PATH")
             if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
-                log "Removing old/stale session directory (container path): $D_CONTAINER_PATH (timeout 5m)"
-                # We can remove the directory using its container path
+                        log "Removing old/stale session directory in hash structure: $D_CONTAINER_PATH (timeout 5m)"
                 timeout 300 rm -rf "$D_CONTAINER_PATH" >> "$LOG_FILE" 2>&1
                 RM_EXIT_CODE=$?
                 if [ $RM_EXIT_CODE -ne 0 ]; then
@@ -146,6 +186,44 @@ if [ -d "$CONTAINER_SESSIONS_PATH" ]; then
             fi
         fi
     done
+        fi
+    done
+    
+    # Clean up sessions in old flat structure (for backward compatibility)
+    for D_CONTAINER_PATH in "$CONTAINER_SESSIONS_PATH"/* ; do
+        if [ -d "$D_CONTAINER_PATH" ]; then
+            DIR_NAME=$(basename "$D_CONTAINER_PATH")
+            # Skip hash directories (already processed above) and special directories
+            if [ "$DIR_NAME" != "default" ] && [ ${#DIR_NAME} -ne 8 ]; then
+                SNAP_ID="$DIR_NAME"
+                if [ "$SNAP_ID" != "$MY_OWN_SNAPSHOT_ID" ]; then
+                    log "Removing old/stale session directory in flat structure: $D_CONTAINER_PATH (timeout 5m)"
+                    timeout 300 rm -rf "$D_CONTAINER_PATH" >> "$LOG_FILE" 2>&1
+                    RM_EXIT_CODE=$?
+                    if [ $RM_EXIT_CODE -ne 0 ]; then
+                        log "WARNING: 'rm -rf $D_CONTAINER_PATH' finished with exit code $RM_EXIT_CODE. It may have timed out or failed."
+                    fi
+                    CLEANUP_COUNT=$((CLEANUP_COUNT + 1))
+                fi
+            fi
+        fi
+    done
+    
+    # Clean up old named structure under /sessions/default/ (legacy support)
+    if [ -d "$CONTAINER_SESSIONS_PATH/default" ]; then
+        for POD_DIR in "$CONTAINER_SESSIONS_PATH/default"/* ; do
+            if [ -d "$POD_DIR" ]; then
+                POD_NAME=$(basename "$POD_DIR")
+                log "Removing legacy session directory: $POD_DIR (timeout 5m)"
+                timeout 300 rm -rf "$POD_DIR" >> "$LOG_FILE" 2>&1
+                RM_EXIT_CODE=$?
+                if [ $RM_EXIT_CODE -ne 0 ]; then
+                    log "WARNING: 'rm -rf $POD_DIR' finished with exit code $RM_EXIT_CODE. It may have timed out or failed."
+                fi
+                CLEANUP_COUNT=$((CLEANUP_COUNT + 1))
+            fi
+        done
+    fi
 fi
 log "Cleanup complete. Removed $CLEANUP_COUNT old session director(y/ies)."
 
