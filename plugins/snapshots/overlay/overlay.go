@@ -263,10 +263,13 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 // getSnapshotPath returns the path for snapshots, using short paths if enabled
 func (o *snapshotter) getSnapshotPath(id string) string {
 	if o.shortBasePaths {
-		// Use the containerd root's parent directory as the base for short paths
-		// This assumes the root is something like "/s/d" and we want "/s/l"
-		baseDir := filepath.Dir(o.root)
-		return filepath.Join(baseDir, "l", id)
+		// Extract the base shared storage path from the containerd root
+		// o.root is like "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		// We need to get to "/s/l" for short paths
+		// Find the shared storage base by going up from containerd root
+		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+		return filepath.Join(sharedStorageBase, "l", id)
 	}
 	return filepath.Join(o.root, "snapshots", id)
 }
@@ -284,9 +287,10 @@ func (o *snapshotter) getSnapshotWorkPath(id string) string {
 // getSnapshotsRoot returns the root directory for snapshots
 func (o *snapshotter) getSnapshotsRoot() string {
 	if o.shortBasePaths {
-		// Use the containerd root's parent directory as the base for short paths
-		baseDir := filepath.Dir(o.root)
-		return filepath.Join(baseDir, "l")
+		// Extract the base shared storage path from the containerd root
+		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+		return filepath.Join(sharedStorageBase, "l")
 	}
 	return filepath.Join(o.root, "snapshots")
 }
@@ -297,9 +301,10 @@ func (o *snapshotter) ensureShortPathsExist() error {
 		return nil
 	}
 
-	// Use the containerd root's parent directory as the base for short paths
-	baseDir := filepath.Dir(o.root)
-	shortSnapshotsDir := filepath.Join(baseDir, "l")
+	// Extract the base shared storage path from the containerd root
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
 
 	// Create the short path directories
 	if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
@@ -648,8 +653,9 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 
 	// If using short paths, also clean up the short paths directory
 	if o.shortBasePaths {
-		baseDir := filepath.Dir(o.root)
-		shortSnapshotDir := filepath.Join(baseDir, "l")
+		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+		shortSnapshotDir := filepath.Join(sharedStorageBase, "l")
 		if fd, err := os.Open(shortSnapshotDir); err == nil {
 			defer fd.Close()
 			if dirs, err := fd.Readdirnames(0); err == nil {
@@ -751,8 +757,9 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 					parentUpperForStat = filepath.Join(o.root, "snapshots", parentID, "fs")
 				} else {
 					// If original paths are enabled but failed, try short path
-					baseDir := filepath.Dir(o.root)
-					parentUpperForStat = filepath.Join(baseDir, "l", parentID, "fs")
+					containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+					sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+					parentUpperForStat = filepath.Join(sharedStorageBase, "l", parentID, "fs")
 				}
 				st, statErr = os.Stat(parentUpperForStat)
 			}
@@ -919,8 +926,9 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 				parentUpperPath = filepath.Join(o.root, "snapshots", parentID, "fs")
 			} else {
 				// If original paths are enabled but failed, try short path
-				baseDir := filepath.Dir(o.root)
-				parentUpperPath = filepath.Join(baseDir, "l", parentID, "fs")
+				containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+				sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+				parentUpperPath = filepath.Join(sharedStorageBase, "l", parentID, "fs")
 			}
 		}
 
@@ -950,8 +958,9 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 				parentPath = filepath.Join(o.root, "snapshots", parentID, "fs")
 			} else {
 				// If original paths are enabled but failed, try short path
-				baseDir := filepath.Dir(o.root)
-				parentPath = filepath.Join(baseDir, "l", parentID, "fs")
+				containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+				sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+				parentPath = filepath.Join(sharedStorageBase, "l", parentID, "fs")
 			}
 		}
 
