@@ -54,54 +54,21 @@ version = 3
       
       [plugins."io.containerd.cri.v1.images".registry.auths]
 
-      [plugins."io.containerd.cri.v1.images".registry.configs]
-        [plugins."io.containerd.cri.v1.images".registry.configs."jfrog.tecorigin.net".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."registry.tecorigin.io:5443".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."business.tecorigin.io:5443".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."business1.tecorigin.io:5443".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."business2.tecorigin.io:5443".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."registry.tecorigin.net:5443".tls]
-          insecure_skip_verify = true
-        [plugins."io.containerd.cri.v1.images".registry.configs."registry.tecorigin.local:5000".tls]
-          insecure_skip_verify = true
-
       [plugins."io.containerd.cri.v1.images".registry.headers]
-
-      [plugins."io.containerd.cri.v1.images".registry.mirrors]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."jfrog.tecorigin.net"]
-          endpoint = ["http://jfrog.tecorigin.net"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."registry.tecorigin.io:5443"]
-          endpoint = ["https://registry.tecorigin.io:5443"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."business.tecorigin.io:5443"]
-          endpoint = ["http://business.tecorigin.io:5443"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."business1.tecorigin.io:5443"]
-          endpoint = ["https://business1.tecorigin.io:5443"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."business2.tecorigin.io:5443"]
-          endpoint = ["http://business2.tecorigin.io:5443"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."registry.tecorigin.net:5443"]
-          endpoint = ["https://registry.tecorigin.net:5443"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."registry.tecorigin.local:5000"]
-          endpoint = ["http://registry.tecorigin.local:5000"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."docker.io"]
-          endpoint = ["https://docker.nju.edu.cn/", "https://kuamavit.mirror.aliyuncs.com"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."gcr.io"]
-          endpoint = ["https://gcr.nju.edu.cn"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."k8s.gcr.io"]
-          endpoint = ["https://gcr.nju.edu.cn/google-containers/"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."quay.io"]
-          endpoint = ["https://quay.nju.edu.cn"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."ghcr.io"]
-          endpoint = ["https://ghcr.nju.edu.cn"]
-        [plugins."io.containerd.cri.v1.images".registry.mirrors."nvcr.io"]
-          endpoint = ["https://ngc.nju.edu.cn"]
 
     [plugins."io.containerd.cri.v1.images".image_decryption]
       key_model = "node"
+
+  [plugins."io.containerd.grpc.v1.cri"]
+    disable_tcp_service = true
+    stream_server_address = "127.0.0.1"
+    stream_server_port = "0"
+    stream_idle_timeout = "4h0m0s"
+    enable_tls_streaming = false
+
+    [plugins."io.containerd.grpc.v1.cri".x509_key_pair_streaming]
+      tls_cert_file = ""
+      tls_key_file = ""
 
   [plugins."io.containerd.cri.v1.runtime"]
     enable_selinux = false
@@ -172,9 +139,6 @@ version = 3
           snapshotter = ""
           sandboxer = "podsandbox"
           io_type = ""
-          # Legacy compatibility fields (deprecated but may be needed for some setups)
-          runtime_engine = ""
-          runtime_root = ""
 
           [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.teco.options]
             SystemdCgroup = true
@@ -186,10 +150,6 @@ version = 3
             NoNewKeyring = false
             Root = ""
             ShimCgroup = ""
-            # Legacy compatibility options (deprecated but may be needed for checkpoint/restore)
-            CriuPath = ""
-            NoPivotRoot = false
-            env = ["LD_LIBRARY_PATH=/opt/tecoai/lib64:/opt/mellanox/sharp/lib:/usr/mpi/gcc/openmpi-4.1.5rc2/lib"]
 
     [plugins."io.containerd.cri.v1.runtime".cni]
       bin_dir = ""
@@ -207,48 +167,6 @@ version = 3
     pause_threshold = 0.02
     schedule_delay = "0s"
     startup_delay = "100ms"
-
-  [plugins."io.containerd.grpc.v1.cri"]
-    cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
-    device_ownership_from_security_context = false
-    disable_apparmor = false
-    disable_cgroup = false
-    disable_hugetlb_controller = true
-    disable_proc_mount = false
-    disable_tcp_service = true
-    drain_exec_sync_io_timeout = "0s"
-    enable_cdi = false
-    enable_selinux = false
-    enable_tls_streaming = false
-    enable_unprivileged_icmp = false
-    enable_unprivileged_ports = false
-    ignore_image_defined_volumes = false
-    image_pull_progress_timeout = "15m0s"
-    max_concurrent_downloads = 3
-    max_container_log_line_size = 16384
-    netns_mounts_under_state_dir = false
-    restrict_oom_score_adj = false
-    sandbox_image = "registry.tecorigin.local:5000/easzlab/pause:3.9"
-    selinux_category_range = 1024
-    stats_collect_period = 10
-    stream_idle_timeout = "4h0m0s"
-    stream_server_address = "127.0.0.1"
-    stream_server_port = "0"
-    systemd_cgroup = false
-    tolerate_missing_hugetlb_controller = true
-    unset_seccomp_profile = ""
-
-    [plugins."io.containerd.grpc.v1.cri".cni]
-      bin_dir = "/opt/cni/bin"
-      conf_dir = "/etc/cni/net.d"
-      conf_template = "/etc/cni/net.d/10-default.conf"
-      ip_pref = ""
-      max_conf_num = 1
-      setup_serially = false
-
-    [plugins."io.containerd.grpc.v1.cri".x509_key_pair_streaming]
-      tls_cert_file = ""
-      tls_key_file = ""
 
   [plugins."io.containerd.internal.v1.opt"]
     path = "/opt/containerd"
@@ -284,7 +202,6 @@ version = 3
 
   [plugins."io.containerd.runtime.v2.task"]
     platforms = ["linux/amd64"]
-    sched_core = false
 
   [plugins."io.containerd.service.v1.diff-service"]
     default = ["walking"]
@@ -322,6 +239,8 @@ version = 3
     root_path = ""
     sync_remove = false
     upperdir_label = false
+    # Enable short base paths for mount options optimization
+    # This significantly reduces mount option length for large multi-layer images
     short_base_paths = true
 
   [plugins."io.containerd.snapshotter.v1.zfs"]
@@ -331,15 +250,6 @@ version = 3
     endpoint = ""
     insecure = false
     protocol = ""
-
-  [plugins."io.containerd.transfer.v1.local"]
-    config_path = ""
-    max_concurrent_downloads = 3
-    max_concurrent_uploaded_layers = 3
-
-         [[plugins."io.containerd.transfer.v1.local".unpack_config]]
-       differ = ""
-       snapshotter = "overlayfs"
 
 [proxy_plugins]
 
