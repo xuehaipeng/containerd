@@ -2,52 +2,50 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: nb-test
+  name: nb-test-teco
   namespace: default
 spec:
   clusterIP: None
   selector:
-    app: nb-test
+    app: nb-test-teco
 
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: nb-test
+  name: nb-test-teco
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nb-test
-  serviceName: "nb-test"
+      app: nb-test-teco
+  serviceName: "nb-test-teco"
   template:
     metadata:
       labels:
-        app: nb-test
+        app: nb-test-teco
         tenant_id: "1"
     spec:
-      # Using hash-based shared snapshots - successfully tested with large images!
-      # Container state is preserved in /s/{pod_hash}/{snapshot_hash}/ structure
       nodeSelector:
-        kubernetes.io/hostname: n-d-master1
+        kubernetes.io/hostname: dev-node220
       containers:
-      - name: inference
-        image: business2.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
+      - name: pytorch
+        image: business1.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
         command: ["sleep", "99999"]
         workingDir: /
         env:
         - name: TZ
           value: "Asia/Shanghai"
-        - name: CURRENT_CONTAINER_NAME
-          value: "inference" 
         resources:
           requests:
             memory: "2Gi"
             cpu: "1"
+            teco.com/gpu: "1"
           limits:
             memory: "2Gi"
             cpu: "1"
+            teco.com/gpu: "1"
         volumeMounts:
         - name: scripts
           mountPath: /scripts
@@ -61,10 +59,11 @@ spec:
           postStart:
             exec:
               command: ["/bin/sh", "/scripts/post_start_hook.sh"]
+      schedulerName: "volcano"
       volumes:
       - name: scripts
         hostPath:
-          path: /root/snap/scripts
+          path: /tecofs/notebook-pods/scripts
           type: Directory
       - name: sessions
         hostPath:

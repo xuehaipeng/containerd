@@ -42,7 +42,7 @@ echo "POST-START HOOK RUNNING" >&2
 # Get current pod information from environment or defaults
 CURRENT_NAMESPACE="${CURRENT_NAMESPACE:-default}"
 CURRENT_POD_NAME="${HOSTNAME:-nb-test-0}"
-CURRENT_CONTAINER_NAME="${CURRENT_CONTAINER_NAME:-pytorch}"
+CURRENT_CONTAINER_NAME="${CURRENT_CONTAINER_NAME:-inference}"
 
 log "Current pod info: namespace=$CURRENT_NAMESPACE, pod=$CURRENT_POD_NAME, container=$CURRENT_CONTAINER_NAME"
 
