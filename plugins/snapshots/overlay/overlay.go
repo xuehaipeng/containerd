@@ -607,11 +607,51 @@ func (o *snapshotter) Cleanup(ctx context.Context) error {
 		return err
 	}
 
+	log.G(ctx).WithField("count", len(cleanup)).Debug("Starting snapshotter cleanup")
+
+	// Determine the shared storage base dynamically from configuration
+	// o.root is like "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	// We need to extract the shared storage base (e.g., "/s")
+	var sharedStorageBase string
+	var shortPathsDir string
+	if o.shortBasePaths {
+		containerdRoot := filepath.Dir(o.root)                // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		sharedStorageBase = filepath.Dir(containerdRoot)      // "/s" from "/s/d"
+		shortPathsDir = filepath.Join(sharedStorageBase, "l") // "/s/l"
+	}
+
+	preservedCount := 0
+	removedCount := 0
+
 	for _, dir := range cleanup {
+		// CRITICAL SAFEGUARD: Never delete anything in the short paths directory
+		// The short paths directory (e.g., /s/l) contains layer snapshots (lowerdirs) that are shared
+		// across containers and must persist across container lifecycles
+		if o.shortBasePaths && shortPathsDir != "" {
+			// Check if this directory is within the short paths directory
+			if strings.HasPrefix(dir, shortPathsDir+"/") || dir == shortPathsDir {
+				log.G(ctx).WithField("path", dir).WithField("shortPathsDir", shortPathsDir).Warn("SAFEGUARD: Prevented cleanup of layer content directory - this contains shared image layers")
+				preservedCount++
+				continue
+			}
+		}
+
 		if err := os.RemoveAll(dir); err != nil {
 			log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
+		} else {
+			log.G(ctx).WithField("path", dir).Debug("successfully removed directory")
+			removedCount++
 		}
 	}
+
+	log.G(ctx).WithFields(map[string]interface{}{
+		"removed":           removedCount,
+		"preserved":         preservedCount,
+		"total":             len(cleanup),
+		"shortBasePaths":    o.shortBasePaths,
+		"shortPathsDir":     shortPathsDir,
+		"sharedStorageBase": sharedStorageBase,
+	}).Info("Snapshotter cleanup completed")
 
 	return nil
 }
@@ -651,23 +691,28 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 		}
 	}
 
-	// If using short paths, also clean up the short paths directory
-	if o.shortBasePaths {
-		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
-		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
-		shortSnapshotDir := filepath.Join(sharedStorageBase, "l")
-		if fd, err := os.Open(shortSnapshotDir); err == nil {
-			defer fd.Close()
-			if dirs, err := fd.Readdirnames(0); err == nil {
-				for _, d := range dirs {
-					if _, ok := ids[d]; ok {
-						continue
-					}
-					cleanup = append(cleanup, filepath.Join(shortSnapshotDir, d))
-				}
-			}
-		}
-	}
+	// DO NOT clean up the short paths directory (e.g., /s/l)
+	// The short paths directory contains layer snapshots (lowerdirs) that are shared across containers
+	// and image layers that should persist across container lifecycles. These are managed by
+	// containerd's normal garbage collection process and should not be cleaned up here.
+	//
+	// The actual path is determined dynamically from configuration:
+	// - o.root (e.g., "/s/d/io.containerd.snapshotter.v1.overlayfs") comes from config root setting
+	// - sharedStorageBase (e.g., "/s") is extracted from containerd root
+	// - shortPathsDir (e.g., "/s/l") is sharedStorageBase + "l"
+	//
+	// This ensures the safeguard works regardless of the configured shared storage paths.
+	//
+	// Previously this code was incorrectly cleaning up short paths directory contents:
+	//
+	// if o.shortBasePaths {
+	//     containerdRoot := filepath.Dir(o.root)
+	//     sharedStorageBase := filepath.Dir(containerdRoot)
+	//     shortSnapshotDir := filepath.Join(sharedStorageBase, "l")
+	//     // ... cleanup logic that was incorrectly removing layer content
+	// }
+	//
+	// This was causing the deletion of image layer content, breaking container functionality.
 
 	return cleanup, nil
 }
