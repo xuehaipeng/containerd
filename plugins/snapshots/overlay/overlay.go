@@ -311,6 +311,9 @@ func (o *snapshotter) ensureShortPathsExist() error {
 		return fmt.Errorf("failed to create short snapshots directory: %w", err)
 	}
 
+	// Log successful creation/verification for debugging
+	log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Debug("Short paths directory ensured")
+
 	// Create symlinks to maintain compatibility
 	originalSnapshotsDir := filepath.Join(o.root, "snapshots")
 	if _, err := os.Stat(originalSnapshotsDir); err == nil {
@@ -320,6 +323,28 @@ func (o *snapshotter) ensureShortPathsExist() error {
 			if target, err := os.Readlink(shortSnapshotsDir); err != nil || target != originalSnapshotsDir {
 				log.L.Warnf("Short paths directory %s exists but is not linked to %s. Manual migration may be required.", shortSnapshotsDir, originalSnapshotsDir)
 			}
+		}
+	}
+
+	return nil
+}
+
+// ensureShortPathsExistForSnapshot ensures the short paths directory exists before creating snapshots
+func (o *snapshotter) ensureShortPathsExistForSnapshot() error {
+	if !o.shortBasePaths {
+		return nil
+	}
+
+	// Extract the base shared storage path from the containerd root
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
+
+	// Check if the directory exists, if not recreate it
+	if _, err := os.Stat(shortSnapshotsDir); os.IsNotExist(err) {
+		log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Warn("Short paths directory was missing, recreating")
+		if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
+			return fmt.Errorf("failed to recreate short snapshots directory: %w", err)
 		}
 	}
 
@@ -459,6 +484,12 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 	}); err != nil {
 		return nil, err
 	}
+	
+	// Ensure short paths directory exists before mounting
+	if err := o.ensureShortPathsExistForSnapshot(); err != nil {
+		return nil, fmt.Errorf("failed to ensure short paths directory exists for mount: %w", err)
+	}
+	
 	return o.mounts(s, info), nil
 }
 
@@ -703,16 +734,24 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 	//
 	// This ensures the safeguard works regardless of the configured shared storage paths.
 	//
-	// Previously this code was incorrectly cleaning up short paths directory contents:
-	//
-	// if o.shortBasePaths {
-	//     containerdRoot := filepath.Dir(o.root)
-	//     sharedStorageBase := filepath.Dir(containerdRoot)
-	//     shortSnapshotDir := filepath.Join(sharedStorageBase, "l")
-	//     // ... cleanup logic that was incorrectly removing layer content
-	// }
-	//
-	// This was causing the deletion of image layer content, breaking container functionality.
+	// CRITICAL SAFEGUARD: We explicitly exclude any paths that could be in the short paths directory
+	// to prevent accidental deletion of layer content.
+	if o.shortBasePaths {
+		containerdRoot := filepath.Dir(o.root)                // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+		sharedStorageBase := filepath.Dir(containerdRoot)      // "/s" from "/s/d"
+		shortPathsDir := filepath.Join(sharedStorageBase, "l") // "/s/l"
+		
+		// Filter out any paths that might be in the short paths directory
+		filteredCleanup := []string{}
+		for _, dir := range cleanup {
+			if strings.HasPrefix(dir, shortPathsDir+"/") || dir == shortPathsDir {
+				log.G(ctx).WithField("path", dir).WithField("shortPathsDir", shortPathsDir).Warn("SAFEGUARD: Excluded layer content directory from cleanup list")
+				continue
+			}
+			filteredCleanup = append(filteredCleanup, dir)
+		}
+		cleanup = filteredCleanup
+	}
 
 	return cleanup, nil
 }
@@ -724,6 +763,11 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		localSnapshotTempDir   string
 		localSnapshotFinalPath string // For local case
 	)
+
+	// Ensure short paths directory exists before creating snapshots
+	if err := o.ensureShortPathsExistForSnapshot(); err != nil {
+		return nil, fmt.Errorf("failed to ensure short paths directory exists: %w", err)
+	}
 
 	defer func() {
 		if err != nil {
