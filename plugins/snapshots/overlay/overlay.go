@@ -251,6 +251,11 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, err
 	}
 
+	// Ensure short paths protection
+	if err := snapshotter.ensureShortPathsProtection(); err != nil {
+		return nil, err
+	}
+
 	// Create snapshots directory
 	snapshotsDir := snapshotter.getSnapshotsRoot()
 	if err := os.Mkdir(snapshotsDir, 0700); err != nil && !os.IsExist(err) {
@@ -349,6 +354,62 @@ func (o *snapshotter) ensureShortPathsExistForSnapshot() error {
 	}
 
 	return nil
+}
+
+// ensureShortPathsProtection ensures the short paths directory is protected from accidental deletion
+func (o *snapshotter) ensureShortPathsProtection() error {
+	if !o.shortBasePaths {
+		return nil
+	}
+
+	// Extract the base shared storage path from the containerd root
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
+
+	// CRITICAL: Ensure the directory exists and is protected
+	// This is the most important safeguard - the /s/l directory MUST always exist
+	if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
+		return fmt.Errorf("failed to ensure short snapshots directory: %w", err)
+	}
+
+	// Create a hidden marker file to indicate this is a protected directory
+	markerFile := filepath.Join(shortSnapshotsDir, ".containerd_layer_snapshots")
+	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
+		file, err := os.Create(markerFile)
+		if err != nil {
+			log.L.WithError(err).Warn("Failed to create layer snapshots marker file")
+		} else {
+			file.WriteString("This directory contains containerd layer snapshots and should not be deleted.\n")
+			file.WriteString("Created by containerd overlay snapshotter with short_base_paths enabled.\n")
+			file.WriteString("Deleting this directory will break container functionality.\n")
+			file.Close()
+		}
+	}
+
+	log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Debug("Short paths directory protection ensured")
+	return nil
+}
+
+// forceProtectShortPaths is a more aggressive protection mechanism that gets called
+// at critical points to ensure the /s/l directory always exists
+func (o *snapshotter) forceProtectShortPaths() {
+	if !o.shortBasePaths {
+		return
+	}
+
+	// Extract the base shared storage path from the containerd root
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
+
+	// Force recreate the directory if it doesn't exist
+	if _, err := os.Stat(shortSnapshotsDir); os.IsNotExist(err) {
+		log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Error("CRITICAL: Short paths directory was deleted, force recreating")
+		if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
+			log.L.WithError(err).WithField("shortSnapshotsDir", shortSnapshotsDir).Error("CRITICAL: Failed to recreate short paths directory")
+		}
+	}
 }
 
 func hasOption(options []string, key string, hasValue bool) bool {
@@ -490,6 +551,9 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 		return nil, fmt.Errorf("failed to ensure short paths directory exists for mount: %w", err)
 	}
 	
+	// CRITICAL: Force protect short paths before mounting
+	o.forceProtectShortPaths()
+	
 	return o.mounts(s, info), nil
 }
 
@@ -596,6 +660,10 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		// 	log.G(ctx).WithError(errR).WithField("path", sharedPathToRemove).Warn("failed to remove shared directory")
 		// }
 	}
+	
+	// CRITICAL: Force protect short paths after removal operations
+	o.forceProtectShortPaths()
+	
 	return nil
 }
 
@@ -769,6 +837,11 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		return nil, fmt.Errorf("failed to ensure short paths directory exists: %w", err)
 	}
 
+	// Ensure short paths protection before creating snapshots
+	if err := o.ensureShortPathsProtection(); err != nil {
+		return nil, fmt.Errorf("failed to ensure short paths protection: %w", err)
+	}
+
 	defer func() {
 		if err != nil {
 			if localSnapshotTempDir != "" { // only if it was created and not renamed/handled
@@ -866,6 +939,9 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		}
 
 		if isSharedSnapshot(info) && kind == snapshots.KindActive {
+			// CRITICAL: Force protect short paths before creating shared snapshot
+			o.forceProtectShortPaths()
+			
 			sharedBase, pathErr := getSharedPathBase(info, s.ID)
 			if pathErr != nil {
 				return fmt.Errorf("cannot determine shared path for snapshot %s: %w", s.ID, pathErr)
@@ -901,12 +977,17 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 				}
 			}
 			// Ensure local snapshot ID marker directory exists
-			ensureLocalSnapshotIDDir := o.getSnapshotPath(s.ID)
+			// For shared snapshots, always use the original path (not short paths) to avoid conflicts
+			// with layer snapshots in /s/l/
+			ensureLocalSnapshotIDDir := filepath.Join(o.root, "snapshots", s.ID)
 			if _, errStat := os.Stat(ensureLocalSnapshotIDDir); os.IsNotExist(errStat) {
 				if errMk := os.Mkdir(ensureLocalSnapshotIDDir, 0700); errMk != nil {
 					log.G(ctx).WithError(errMk).Warnf("Failed to create local marker directory for shared snapshot %s", s.ID)
 				}
 			}
+			
+			// CRITICAL: Force protect short paths after creating shared snapshot
+			o.forceProtectShortPaths()
 		} else { // Local snapshot logic (or KindView which is always local-like)
 			localSnapshotsRootDir := o.getSnapshotsRoot()
 			localSnapshotTempDir, err = o.prepareDirectory(ctx, localSnapshotsRootDir, kind)
@@ -957,6 +1038,9 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mount {
 	var options []string
 	log.L.WithField("snapshotID", s.ID).WithField("kind", s.Kind).Debugf("mounts: determining mount options for snapshot")
+	
+	// CRITICAL: Force protect short paths before determining mount options
+	o.forceProtectShortPaths()
 
 	if o.remapIDs {
 		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
