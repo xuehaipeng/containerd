@@ -132,16 +132,17 @@ func WithShortBasePaths(config *SnapshotterConfig) error {
 // isSharedSnapshot checks labels to see if this snapshot should use shared storage.
 func isSharedSnapshot(info snapshots.Info) bool {
 	if val, ok := info.Labels[LabelUseSharedStorage]; ok && val == "true" {
-		log.L.Debugf("isSharedSnapshot: returning true")
+		log.L.Infof("isSharedSnapshot: returning true for labels: %+v", info.Labels)
 		return true
 	}
+	log.L.Infof("isSharedSnapshot: returning false for labels: %+v", info.Labels)
 	return false
 }
 
 // getSharedPathBase constructs the base directory on shared storage for a given snapshot.
 // It requires the snapshot ID for uniqueness.
 func getSharedPathBase(info snapshots.Info, id string) (string, error) {
-	log.L.Debugf("getSharedPathBase: id=%s, info.Labels: %+v", id, info.Labels)
+	log.L.Infof("getSharedPathBase: id=%s, info.Labels: %+v", id, info.Labels)
 	if info.Labels == nil {
 		return "", fmt.Errorf("missing labels for shared storage path construction")
 	}
@@ -151,8 +152,11 @@ func getSharedPathBase(info snapshots.Info, id string) (string, error) {
 	podName, okP := info.Labels[LabelK8sPodName]
 	containerName, okC := info.Labels[LabelK8sContainerName]
 
+	log.L.Infof("getSharedPathBase: Labels check - sharedDiskPath=%s(ok=%v), namespace=%s(ok=%v), podName=%s(ok=%v), containerName=%s(ok=%v)", 
+		sharedDiskPath, okS, kubeNamespace, okN, podName, okP, containerName, okC)
+
 	if !okS || !okN || !okP || !okC {
-		return "", fmt.Errorf("missing one or more required labels for shared storage path (sharedPath, namespace, podName, containerName)")
+		return "", fmt.Errorf("missing one or more required labels for shared storage path (sharedPath=%v, namespace=%v, podName=%v, containerName=%v)", okS, okN, okP, okC)
 	}
 	if id == "" {
 		return "", fmt.Errorf("snapshot ID is required for shared storage path")
@@ -170,7 +174,7 @@ func getSharedPathBase(info snapshots.Info, id string) (string, error) {
 		log.L.WithError(err).Warnf("Failed to register path mapping for %s", basePath)
 	}
 
-	log.L.Debugf("getSharedPathBase: using hash-based path %s for pod %s, snapshot %s", basePath, podIdentifier, id)
+	log.L.Infof("getSharedPathBase: using hash-based path %s for pod %s, snapshot %s", basePath, podIdentifier, id)
 	return basePath, nil
 }
 
@@ -274,7 +278,9 @@ func (o *snapshotter) getSnapshotPath(id string) string {
 		// Find the shared storage base by going up from containerd root
 		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
 		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
-		return filepath.Join(sharedStorageBase, "l", id)
+		shortPath := filepath.Join(sharedStorageBase, "l", id)
+		log.L.Debugf("getSnapshotPath: using short path %s for snapshot %s", shortPath, id)
+		return shortPath
 	}
 	return filepath.Join(o.root, "snapshots", id)
 }
@@ -319,18 +325,65 @@ func (o *snapshotter) ensureShortPathsExist() error {
 	// Log successful creation/verification for debugging
 	log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Debug("Short paths directory ensured")
 
-	// Create symlinks to maintain compatibility
+	// Migrate existing snapshots to short paths location
+	if err := o.migrateExistingSnapshots(); err != nil {
+		log.L.WithError(err).Warn("Failed to migrate existing snapshots to short paths")
+	}
+
+	return nil
+}
+
+// migrateExistingSnapshots moves existing snapshots from original location to short paths
+func (o *snapshotter) migrateExistingSnapshots() error {
+	if !o.shortBasePaths {
+		return nil
+	}
+
 	originalSnapshotsDir := filepath.Join(o.root, "snapshots")
-	if _, err := os.Stat(originalSnapshotsDir); err == nil {
-		// Original exists, check if we need to migrate
-		if _, err := os.Stat(shortSnapshotsDir); err == nil {
-			// Both exist, check if short path is a symlink to original
-			if target, err := os.Readlink(shortSnapshotsDir); err != nil || target != originalSnapshotsDir {
-				log.L.Warnf("Short paths directory %s exists but is not linked to %s. Manual migration may be required.", shortSnapshotsDir, originalSnapshotsDir)
+	
+	// Extract the base shared storage path from the containerd root
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
+
+	// Check if original snapshots directory exists
+	if _, err := os.Stat(originalSnapshotsDir); os.IsNotExist(err) {
+		return nil // No existing snapshots to migrate
+	}
+
+	// Read existing snapshots
+	entries, err := os.ReadDir(originalSnapshotsDir)
+	if err != nil {
+		return fmt.Errorf("failed to read original snapshots directory: %w", err)
+	}
+
+	migratedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			snapshotID := entry.Name()
+			originalPath := filepath.Join(originalSnapshotsDir, snapshotID)
+			shortPath := filepath.Join(shortSnapshotsDir, snapshotID)
+			
+			// Check if snapshot already exists in short path
+			if _, err := os.Stat(shortPath); err == nil {
+				log.L.Debugf("Snapshot %s already exists in short path, skipping migration", snapshotID)
+				continue
+			}
+			
+			// Move snapshot from original to short path
+			if err := os.Rename(originalPath, shortPath); err != nil {
+				log.L.WithError(err).Warnf("Failed to migrate snapshot %s from %s to %s", snapshotID, originalPath, shortPath)
+			} else {
+				log.L.Infof("Migrated snapshot %s from %s to %s", snapshotID, originalPath, shortPath)
+				migratedCount++
 			}
 		}
 	}
-
+	
+	if migratedCount > 0 {
+		log.L.Infof("Successfully migrated %d snapshots to short paths", migratedCount)
+	}
+	
 	return nil
 }
 
@@ -1003,6 +1056,7 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			}
 
 			localSnapshotFinalPath = o.getSnapshotPath(s.ID)
+			log.L.Debugf("Creating local snapshot: renaming %s to %s", localSnapshotTempDir, localSnapshotFinalPath)
 			if err = os.Rename(localSnapshotTempDir, localSnapshotFinalPath); err != nil {
 				// localSnapshotTempDir will be cleaned by the outer defer
 				return fmt.Errorf("failed to rename local snapshot dir from %s to %s: %w", localSnapshotTempDir, localSnapshotFinalPath, err)
