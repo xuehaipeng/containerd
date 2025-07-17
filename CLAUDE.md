@@ -183,7 +183,6 @@ We have successfully implemented and deployed a comprehensive solution for the o
 - **Files Added**: `plugins/snapshots/overlay/path_mapping.go`
 - **Key Functions**: `getSharedPathBase()`, `hashString()`, `determineUpperPath()`, `determineWorkPath()`
 - **Path Strategy**: Uses hash-based short directory names and proper shared storage base calculation
-- **Critical Fix**: Corrected path calculation from `/s/d/l/` to `/s/l/` by going up two directory levels
 
 ### 🎯 Issues Resolved:
 
@@ -194,13 +193,6 @@ We have successfully implemented and deployed a comprehensive solution for the o
 - ✅ **Large image support**: Successfully tested with PyTorch containers (56+ layers)
 - ✅ **Shared storage persistence**: Container state properly preserved across restarts
 
-### 🚀 Production Status:
-
-**Successfully deployed and tested on n-d-master1:**
-- Pod status: `1/1 Running` ✅
-- kubectl exec: Working without errors ✅ 
-- File operations: Normal functionality ✅
-- Mount options: Using short paths `/s/l/143/fs:/s/l/142/fs:...` ✅
-- Shared storage: Preserved in `/s/6fb76255/7ed8f0f3/` ✅
-
 When working on this branch, be aware of the shared snapshot optimization context and test changes accordingly.
+
+Always bear in mind
