@@ -141,7 +141,7 @@ func isSharedSnapshot(info snapshots.Info) bool {
 
 // getSharedPathBase constructs the base directory on shared storage for a given snapshot.
 // It requires the snapshot ID for uniqueness.
-func getSharedPathBase(info snapshots.Info, id string) (string, error) {
+func (o *snapshotter) getSharedPathBase(info snapshots.Info, id string) (string, error) {
 	log.L.Infof("getSharedPathBase: id=%s, info.Labels: %+v", id, info.Labels)
 	if info.Labels == nil {
 		return "", fmt.Errorf("missing labels for shared storage path construction")
@@ -160,6 +160,18 @@ func getSharedPathBase(info snapshots.Info, id string) (string, error) {
 	}
 	if id == "" {
 		return "", fmt.Errorf("snapshot ID is required for shared storage path")
+	}
+
+	// CRITICAL: Check for path conflicts with containerd structure
+	// If shared_snapshot_path is the same as containerd's base directory,
+	// this will cause conflicts with /s/l directory (short paths)
+	containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
+	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
+	
+	if sharedDiskPath == sharedStorageBase {
+		log.L.Errorf("CRITICAL: shared_snapshot_path '%s' conflicts with containerd structure '%s'", sharedDiskPath, sharedStorageBase)
+		log.L.Errorf("CRITICAL: This will cause /s/l directory to be affected. Please use a different shared_snapshot_path like '/teco/nb' or '/shared'")
+		return "", fmt.Errorf("shared_snapshot_path '%s' conflicts with containerd structure - use a different path", sharedDiskPath)
 	}
 
 	// Use hash-based paths for shorter mount options
@@ -697,7 +709,7 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	}
 
 	if id != "" && isSharedSnapshot(info) {
-		base, pathErr := getSharedPathBase(info, id)
+		base, pathErr := o.getSharedPathBase(info, id)
 		if pathErr == nil {
 			isDirectoryShared = true
 			sharedPathToRemove = base // The whole base dir: /.../<snapshot_id>
@@ -1036,7 +1048,7 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			// CRITICAL: Force protect short paths before creating shared snapshot
 			o.forceProtectShortPaths()
 			
-			sharedBase, pathErr := getSharedPathBase(info, s.ID)
+			sharedBase, pathErr := o.getSharedPathBase(info, s.ID)
 			if pathErr != nil {
 				return fmt.Errorf("cannot determine shared path for snapshot %s: %w", s.ID, pathErr)
 			}
@@ -1256,7 +1268,7 @@ func (o *snapshotter) determineUpperPath(id string, info snapshots.Info) (string
 		log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned true, determining shared path")
 		// For KindActive, this is the RW layer.
 		// For KindCommitted or KindView, if it *was* a shared snapshot, its 'fs' is on shared storage.
-		base, err := getSharedPathBase(info, id)
+		base, err := o.getSharedPathBase(info, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to get shared path base for upperdir of snapshot %s: %w", id, err)
 		}
@@ -1274,7 +1286,7 @@ func (o *snapshotter) determineWorkPath(id string, info snapshots.Info) (string,
 	log.L.WithField("snapshotID", id).Debug("determining work path")
 	if isSharedSnapshot(info) { // and info.Kind == snapshots.KindActive implicitly by usage context
 		log.L.WithField("snapshotID", id).Debug("isSharedSnapshot returned true, determining shared path")
-		base, err := getSharedPathBase(info, id)
+		base, err := o.getSharedPathBase(info, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to get shared path base for workdir of snapshot %s: %w", id, err)
 		}
