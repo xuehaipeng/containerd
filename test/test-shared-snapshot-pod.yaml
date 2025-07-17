@@ -30,7 +30,7 @@ spec:
       # Using hash-based shared snapshots - successfully tested with large images!
       # Container state is preserved in /s/{pod_hash}/{snapshot_hash}/ structure
       nodeSelector:
-        kubernetes.io/hostname: n-d-master1
+        kubernetes.io/hostname: n-d-master3
       containers:
       - name: inference
         image: business2.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
@@ -69,7 +69,7 @@ spec:
       - name: sessions
         hostPath:
           # Maps to shared storage base - hash-based structure: /s/{pod_hash}/{snapshot_hash}/
-          path: /s
+          path: /teco/nb
           type: Directory
       - name: path-mappings
         hostPath:

@@ -12,3 +12,5 @@ releases/*.tar.gz.sha256sum
 _output/
 .vagrant/
 .idea
+.cursor/
+docs/.DS_Store
