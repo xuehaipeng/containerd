@@ -50,13 +50,27 @@ struct Args {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+struct PathMappings {
+    mappings: HashMap<String, PathMapping>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct PathMapping {
+    #[serde(default = "default_namespace")]
     namespace: String,
     pod_name: String,
     container_name: String,
     created_at: String,
     pod_hash: String,
     snapshot_hash: String,
+    #[serde(default)]
+    snapshot_id: Option<String>,
+    #[serde(default)]
+    last_accessed: Option<String>,
+}
+
+fn default_namespace() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug)]
@@ -192,16 +206,16 @@ fn find_current_session(
     let content = fs::read_to_string(mappings_file)
         .with_context(|| format!("Failed to read mappings file: {}", mappings_file.display()))?;
 
-    let mappings: HashMap<String, PathMapping> = serde_json::from_str(&content)
+    let path_mappings: PathMappings = serde_json::from_str(&content)
         .with_context(|| "Failed to parse path mappings JSON")?;
 
-    info!("Loaded {} path mappings", mappings.len());
+    info!("Loaded {} path mappings", path_mappings.mappings.len());
 
     // Find the most recent matching entry
     let mut best_match: Option<(String, PathMapping)> = None;
     let mut latest_time: Option<DateTime<Utc>> = None;
 
-    for (path_key, mapping) in mappings {
+    for (path_key, mapping) in path_mappings.mappings {
         if mapping.namespace == namespace
             && mapping.pod_name == pod_name
             && mapping.container_name == container_name
