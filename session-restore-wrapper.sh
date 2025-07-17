@@ -12,6 +12,12 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG_FILE"
 }
 
+# Add session separator
+echo "" >> "$LOG_FILE"
+echo "================================================================================" >> "$LOG_FILE"
+echo "NEW SESSION: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
+echo "================================================================================" >> "$LOG_FILE"
+
 log "=== Session Restore Wrapper Started ==="
 log "Arguments: $*"
 log "Working directory: $(pwd)"
