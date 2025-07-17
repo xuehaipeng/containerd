@@ -53,7 +53,7 @@ spec:
         - name: sessions
           mountPath: /sessions
         - name: path-mappings
-          mountPath: /path-mappings.json
+          mountPath: /etc/path-mappings.json
           readOnly: true
         lifecycle:
           postStart:

@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 struct Args {
     #[arg(
         long,
-        default_value = "/path-mappings.json",
+        default_value = "/etc/path-mappings.json",
         help = "Path to the path mappings JSON file"
     )]
     mappings_file: PathBuf,
