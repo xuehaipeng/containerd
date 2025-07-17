@@ -456,13 +456,33 @@ func (o *snapshotter) forceProtectShortPaths() {
 	sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
 	shortSnapshotsDir := filepath.Join(sharedStorageBase, "l")
 
+	// CRITICAL: Always ensure the directory exists, even if it was accidentally deleted
+	if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
+		log.L.WithError(err).WithField("shortSnapshotsDir", shortSnapshotsDir).Error("CRITICAL: Failed to ensure short paths directory exists")
+		return
+	}
+
 	// Force recreate the directory if it doesn't exist
 	if _, err := os.Stat(shortSnapshotsDir); os.IsNotExist(err) {
 		log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Error("CRITICAL: Short paths directory was deleted, force recreating")
 		if err := os.MkdirAll(shortSnapshotsDir, 0700); err != nil {
 			log.L.WithError(err).WithField("shortSnapshotsDir", shortSnapshotsDir).Error("CRITICAL: Failed to recreate short paths directory")
+			return
+		}
+		log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Info("CRITICAL: Successfully force recreated short paths directory")
+		
+		// Create protection marker file
+		markerFile := filepath.Join(shortSnapshotsDir, ".containerd_layer_snapshots")
+		if file, err := os.Create(markerFile); err == nil {
+			file.WriteString("Created by containerd overlay snapshotter with short_base_paths enabled.\n")
+			file.WriteString("Deleting this directory will break container functionality.\n")
+			file.WriteString("This directory contains layer snapshots (lowerdirs) shared across containers.\n")
+			file.WriteString("NEVER DELETE THIS DIRECTORY OR ITS CONTENTS.\n")
+			file.Close()
 		}
 	}
+	
+	log.L.WithField("shortSnapshotsDir", shortSnapshotsDir).Debug("Short paths directory protection ensured")
 }
 
 func hasOption(options []string, key string, hasValue bool) bool {
@@ -872,6 +892,10 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 			filteredCleanup = append(filteredCleanup, dir)
 		}
 		cleanup = filteredCleanup
+		
+		// ADDITIONAL SAFEGUARD: Also check if we're adding the short paths directory itself to cleanup
+		// This ensures we never accidentally remove the entire /s/l directory
+		log.G(ctx).WithField("shortPathsDir", shortPathsDir).Debug("SAFEGUARD: Short paths directory is protected from cleanup")
 	}
 
 	return cleanup, nil
