@@ -34,8 +34,8 @@ fi
 log "Binary found and executable: $BINARY_PATH"
 
 # Check for required files
-if [ ! -f "/path-mappings.json" ]; then
-    log "WARNING: Path mappings file not found at /path-mappings.json"
+if [ ! -f "/etc/path-mappings.json" ]; then
+    log "WARNING: Path mappings file not found at /etc/path-mappings.json"
 fi
 
 if [ ! -d "/sessions" ]; then

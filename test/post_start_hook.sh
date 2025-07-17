@@ -6,7 +6,7 @@ set -x # Enable command tracing for debugging
 
 LOG_FILE="/tmp/poststart.log"
 LOCK_FILE="/tmp/poststart.lock"
-PATH_MAPPINGS_FILE="/path-mappings.json"
+PATH_MAPPINGS_FILE="/etc/path-mappings.json"
 
 # Function to log messages
 log() {
