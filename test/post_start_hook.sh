@@ -55,68 +55,73 @@ fi
 
 log "Reading path mappings from: $PATH_MAPPINGS_FILE"
 
-# Extract our current session info using awk (more portable than jq)
-CURRENT_MAPPING=$(awk -v ns="$CURRENT_NAMESPACE" -v pod="$CURRENT_POD_NAME" -v container="$CURRENT_CONTAINER_NAME" '
-BEGIN { 
-    found = 0
-    latest_time = ""
-    latest_path = ""
-    latest_pod_hash = ""
-    latest_snapshot_hash = ""
-}
-/"mappings"/ { in_mappings = 1; next }
-in_mappings && /"[^"]+": {/ {
-    # Extract the path key (e.g., "6fb76255/7ed8f0f3")
-    gsub(/.*"/, "", $0)
-    gsub(/": {.*/, "", $0)
-    current_path = $0
-    in_entry = 1
-    next
-}
-in_entry && /"namespace":/ {
-    gsub(/.*"namespace": "/, "", $0)
-    gsub(/".*/, "", $0)
-    entry_namespace = $0
-}
-in_entry && /"pod_name":/ {
-    gsub(/.*"pod_name": "/, "", $0)
-    gsub(/".*/, "", $0)
-    entry_pod = $0
-}
-in_entry && /"container_name":/ {
-    gsub(/.*"container_name": "/, "", $0)
-    gsub(/".*/, "", $0)
-    entry_container = $0
-}
-in_entry && /"created_at":/ {
-    gsub(/.*"created_at": "/, "", $0)
-    gsub(/".*/, "", $0)
-    entry_time = $0
-}
-in_entry && /}/ {
-    # End of entry, check if it matches our pod
-    if (entry_namespace == ns && entry_pod == pod && entry_container == container) {
-        if (entry_time > latest_time) {
-            latest_time = entry_time
-            latest_path = current_path
-            split(current_path, parts, "/")
-            latest_pod_hash = parts[1]
-            latest_snapshot_hash = parts[2]
-            found = 1
-        }
-    }
-    in_entry = 0
-    entry_namespace = ""
-    entry_pod = ""
-    entry_container = ""
-    entry_time = ""
-}
-END {
-    if (found) {
-        print latest_pod_hash ":" latest_snapshot_hash ":" latest_path
-    }
-}
-' "$PATH_MAPPINGS_FILE")
+# Extract our current session info using a more direct approach
+CURRENT_MAPPING=""
+if [ -f "$PATH_MAPPINGS_FILE" ]; then
+    # Use a simple script to find the most recent matching entry
+    TEMP_SCRIPT="/tmp/parse_mappings_$$.sh"
+    
+    cat > "$TEMP_SCRIPT" << 'SCRIPT_EOF'
+#!/bin/bash
+NAMESPACE="$1"
+POD_NAME="$2"
+CONTAINER_NAME="$3"
+MAPPINGS_FILE="$4"
+
+LATEST_TIME=""
+LATEST_PATH=""
+
+# Read the file and look for matching entries
+while IFS= read -r line; do
+    if echo "$line" | grep -q "\"[^\"]*\/[^\"]*\": {"; then
+        # Extract the path key
+        PATH_KEY=$(echo "$line" | sed 's/.*"\([^"]*\/[^"]*\)": {.*/\1/')
+        
+        # Read the next several lines to get the entry data
+        ENTRY_DATA=""
+        for i in $(seq 1 10); do
+            read -r next_line || break
+            ENTRY_DATA="$ENTRY_DATA$next_line"
+            if echo "$next_line" | grep -q "^    }"; then
+                break
+            fi
+        done
+        
+        # Check if this entry matches our criteria
+        if echo "$ENTRY_DATA" | grep -q "\"namespace\": \"$NAMESPACE\"" && \
+           echo "$ENTRY_DATA" | grep -q "\"pod_name\": \"$POD_NAME\"" && \
+           echo "$ENTRY_DATA" | grep -q "\"container_name\": \"$CONTAINER_NAME\""; then
+            
+            # Extract the created_at time
+            CREATED_AT=$(echo "$ENTRY_DATA" | grep "\"created_at\":" | sed 's/.*"created_at": "\([^"]*\)".*/\1/')
+            
+            # Check if this is the most recent
+            if [ "$CREATED_AT" \> "$LATEST_TIME" ] || [ -z "$LATEST_TIME" ]; then
+                LATEST_TIME="$CREATED_AT"
+                LATEST_PATH="$PATH_KEY"
+            fi
+        fi
+    fi
+done < "$MAPPINGS_FILE"
+
+if [ -n "$LATEST_PATH" ]; then
+    POD_HASH=$(echo "$LATEST_PATH" | cut -d'/' -f1)
+    SNAPSHOT_HASH=$(echo "$LATEST_PATH" | cut -d'/' -f2)
+    echo "$POD_HASH:$SNAPSHOT_HASH:$LATEST_PATH"
+fi
+SCRIPT_EOF
+
+    chmod +x "$TEMP_SCRIPT"
+    CURRENT_MAPPING=$("$TEMP_SCRIPT" "$CURRENT_NAMESPACE" "$CURRENT_POD_NAME" "$CURRENT_CONTAINER_NAME" "$PATH_MAPPINGS_FILE")
+    rm -f "$TEMP_SCRIPT"
+    
+    if [ -n "$CURRENT_MAPPING" ]; then
+        log "Successfully parsed current mapping: $CURRENT_MAPPING"
+    else
+        log "ERROR: Could not find matching entry in mappings file"
+        log "Looking for: namespace=$CURRENT_NAMESPACE, pod=$CURRENT_POD_NAME, container=$CURRENT_CONTAINER_NAME"
+    fi
+fi
 
 if [ -z "$CURRENT_MAPPING" ]; then
     log "ERROR: Could not find current session in path mappings file"
