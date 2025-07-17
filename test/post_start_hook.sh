@@ -200,19 +200,59 @@ fi
 log "=== Cleanup: Removing old sessions (keeping current and most recent previous) ==="
 CLEANUP_COUNT=0
 
+# CRITICAL FIX: Find the actual current session directory
+# The current session might have just been created and not yet in path mappings
+ACTUAL_CURRENT_SNAPSHOT_HASH=""
+if [ -d "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH" ]; then
+    log "Finding actual current session directory in $CONTAINER_SESSIONS_PATH/$MY_POD_HASH"
+    LATEST_DIR_TIME=0
+    for SNAPSHOT_DIR in "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH"/* ; do
+        if [ -d "$SNAPSHOT_DIR" ]; then
+            SNAPSHOT_HASH=$(basename "$SNAPSHOT_DIR")
+            # Find the most recently modified directory (likely the current session)
+            DIR_TIME=$(stat -c %Y "$SNAPSHOT_DIR" 2>/dev/null || echo 0)
+            log "Found session directory: $SNAPSHOT_HASH (mod time: $DIR_TIME)"
+            if [ "$DIR_TIME" -gt "$LATEST_DIR_TIME" ]; then
+                LATEST_DIR_TIME=$DIR_TIME
+                ACTUAL_CURRENT_SNAPSHOT_HASH=$SNAPSHOT_HASH
+            fi
+        fi
+    done
+    log "Identified actual current session: $ACTUAL_CURRENT_SNAPSHOT_HASH"
+fi
+
+# Use the actual current session hash if found, otherwise fall back to path mappings
+if [ -n "$ACTUAL_CURRENT_SNAPSHOT_HASH" ]; then
+    MY_OWN_SNAPSHOT_HASH=$ACTUAL_CURRENT_SNAPSHOT_HASH
+    log "Using actual current session hash: $MY_OWN_SNAPSHOT_HASH"
+else
+    log "Using path mappings session hash: $MY_OWN_SNAPSHOT_HASH"
+fi
+
 if [ -d "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH" ]; then
     for SNAPSHOT_DIR in "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH"/* ; do
         if [ -d "$SNAPSHOT_DIR" ]; then
             SNAPSHOT_HASH=$(basename "$SNAPSHOT_DIR")
             # Keep current session and the one we just restored from
             if [ "$SNAPSHOT_HASH" != "$MY_OWN_SNAPSHOT_HASH" ] && [ "$SNAPSHOT_HASH" != "$PREVIOUS_SNAPSHOT_HASH" ]; then
-                log "Removing old session directory: $SNAPSHOT_DIR (timeout 5m)"
-                timeout 300 rm -rf "$SNAPSHOT_DIR" >> "$LOG_FILE" 2>&1
-                RM_EXIT_CODE=$?
-                if [ $RM_EXIT_CODE -ne 0 ]; then
-                    log "WARNING: 'rm -rf $SNAPSHOT_DIR' finished with exit code $RM_EXIT_CODE. It may have timed out or failed."
+                # SAFETY CHECK: Don't delete directories created within the last 5 minutes (300 seconds)
+                DIR_TIME=$(stat -c %Y "$SNAPSHOT_DIR" 2>/dev/null || echo 0)
+                CURRENT_TIME=$(date +%s)
+                TIME_DIFF=$((CURRENT_TIME - DIR_TIME))
+                
+                if [ "$TIME_DIFF" -lt 300 ]; then
+                    log "SAFETY: Keeping recently created session directory: $SNAPSHOT_DIR (created $TIME_DIFF seconds ago)"
+                else
+                    log "Removing old session directory: $SNAPSHOT_DIR (created $TIME_DIFF seconds ago, timeout 5m)"
+                    timeout 300 rm -rf "$SNAPSHOT_DIR" >> "$LOG_FILE" 2>&1
+                    RM_EXIT_CODE=$?
+                    if [ $RM_EXIT_CODE -ne 0 ]; then
+                        log "WARNING: 'rm -rf $SNAPSHOT_DIR' finished with exit code $RM_EXIT_CODE. It may have timed out or failed."
+                    fi
+                    CLEANUP_COUNT=$((CLEANUP_COUNT + 1))
                 fi
-                CLEANUP_COUNT=$((CLEANUP_COUNT + 1))
+            else
+                log "Keeping session directory: $SNAPSHOT_DIR (current or previous)"
             fi
         fi
     done
