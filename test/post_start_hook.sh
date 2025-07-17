@@ -146,6 +146,17 @@ PREVIOUS_SNAPSHOT_PATH=""
 
 if [ -d "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH" ]; then
     log "Scanning for previous sessions in pod hash directory: $MY_POD_HASH"
+    log "Current session hash from path mappings: $MY_OWN_SNAPSHOT_HASH"
+    
+    # List all available sessions for debugging
+    log "Available session directories:"
+    for DEBUG_DIR in "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH"/* ; do
+        if [ -d "$DEBUG_DIR" ]; then
+            DEBUG_HASH=$(basename "$DEBUG_DIR")
+            DEBUG_TIME=$(stat -c %Y "$DEBUG_DIR" 2>/dev/null || echo 0)
+            log "  $DEBUG_HASH (mod time: $DEBUG_TIME)"
+        fi
+    done
     
     # Look for the most recent non-current session in our pod hash directory
     LATEST_TIME=0
@@ -157,6 +168,7 @@ if [ -d "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH" ]; then
                 if [ -n "$(find "${SNAPSHOT_DIR}/fs" -mindepth 1 -print -quit 2>/dev/null)" ]; then
                     # Get the modification time of the directory to find the most recent
                     DIR_TIME=$(stat -c %Y "$SNAPSHOT_DIR" 2>/dev/null || echo 0)
+                    log "Evaluating candidate session: $SNAPSHOT_HASH (mod time: $DIR_TIME) vs current latest: $LATEST_TIME"
                     if [ "$DIR_TIME" -gt "$LATEST_TIME" ]; then
                         log "Found candidate session: $SNAPSHOT_HASH (mod time: $DIR_TIME)"
                         PREVIOUS_SNAPSHOT_HASH=$SNAPSHOT_HASH
@@ -164,12 +176,17 @@ if [ -d "$CONTAINER_SESSIONS_PATH/$MY_POD_HASH" ]; then
                         LATEST_TIME=$DIR_TIME
                     fi
                 fi
+            else
+                log "Skipping current session: $SNAPSHOT_HASH"
             fi
         fi
     done
     
     if [ -n "$PREVIOUS_SNAPSHOT_HASH" ]; then
         log "Selected most recent previous session: $PREVIOUS_SNAPSHOT_HASH"
+        log "Previous session path: $PREVIOUS_SNAPSHOT_PATH"
+    else
+        log "No previous session found"
     fi
 else
     log "No pod hash directory found: $CONTAINER_SESSIONS_PATH/$MY_POD_HASH"
