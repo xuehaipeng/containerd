@@ -270,6 +270,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 }
 
 // getSnapshotPath returns the path for snapshots, using short paths if enabled
+// This function also handles the migration transition by checking both paths
 func (o *snapshotter) getSnapshotPath(id string) string {
 	if o.shortBasePaths {
 		// Extract the base shared storage path from the containerd root
@@ -279,7 +280,22 @@ func (o *snapshotter) getSnapshotPath(id string) string {
 		containerdRoot := filepath.Dir(o.root)            // "/s/d" from "/s/d/io.containerd.snapshotter.v1.overlayfs"
 		sharedStorageBase := filepath.Dir(containerdRoot) // "/s" from "/s/d"
 		shortPath := filepath.Join(sharedStorageBase, "l", id)
-		log.L.Debugf("getSnapshotPath: using short path %s for snapshot %s", shortPath, id)
+		
+		// Check if the snapshot actually exists at the short path
+		if _, err := os.Stat(shortPath); err == nil {
+			log.L.Debugf("getSnapshotPath: using short path %s for snapshot %s", shortPath, id)
+			return shortPath
+		}
+		
+		// If short path doesn't exist, try the original path (migration transition)
+		originalPath := filepath.Join(o.root, "snapshots", id)
+		if _, err := os.Stat(originalPath); err == nil {
+			log.L.Debugf("getSnapshotPath: using original path %s for snapshot %s (migration transition)", originalPath, id)
+			return originalPath
+		}
+		
+		// If neither exists, return the expected short path (will be created)
+		log.L.Debugf("getSnapshotPath: using short path %s for snapshot %s (neither exists)", shortPath, id)
 		return shortPath
 	}
 	return filepath.Join(o.root, "snapshots", id)
@@ -333,7 +349,7 @@ func (o *snapshotter) ensureShortPathsExist() error {
 	return nil
 }
 
-// migrateExistingSnapshots moves existing snapshots from original location to short paths
+// migrateExistingSnapshots creates a gradual migration approach that doesn't break metadata
 func (o *snapshotter) migrateExistingSnapshots() error {
 	if !o.shortBasePaths {
 		return nil
@@ -370,11 +386,12 @@ func (o *snapshotter) migrateExistingSnapshots() error {
 				continue
 			}
 			
-			// Move snapshot from original to short path
+			// Use atomic move for safety, but continue on error to avoid disrupting the system
 			if err := os.Rename(originalPath, shortPath); err != nil {
-				log.L.WithError(err).Warnf("Failed to migrate snapshot %s from %s to %s", snapshotID, originalPath, shortPath)
+				log.L.WithError(err).Warnf("Failed to migrate snapshot %s from %s to %s - snapshot will be accessible from original location", snapshotID, originalPath, shortPath)
+				// Don't return error - the getSnapshotPath function will handle both locations
 			} else {
-				log.L.Infof("Migrated snapshot %s from %s to %s", snapshotID, originalPath, shortPath)
+				log.L.Infof("Successfully migrated snapshot %s from %s to %s", snapshotID, originalPath, shortPath)
 				migratedCount++
 			}
 		}
