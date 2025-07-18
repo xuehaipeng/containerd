@@ -137,7 +137,7 @@ CURRENT_PATH=$(echo "$CURRENT_MAPPING" | cut -d: -f3)
 log "Found current session: pod_hash=$MY_POD_HASH, snapshot_hash=$MY_OWN_SNAPSHOT_HASH, path=$CURRENT_PATH"
 
 # The base path for all sessions, as seen INSIDE the container
-CONTAINER_SESSIONS_PATH="/sessions"
+CONTAINER_SESSIONS_PATH="/etc/sessions"
 log "Base sessions path (inside container): $CONTAINER_SESSIONS_PATH"
 
 # Look for previous session directories in the same pod hash directory

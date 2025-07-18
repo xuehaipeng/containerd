@@ -51,7 +51,7 @@ spec:
           mountPath: /scripts
           readOnly: true
         - name: sessions
-          mountPath: /sessions
+          mountPath: /etc/sessions
         - name: path-mappings
           mountPath: /etc/path-mappings.json
           readOnly: true
