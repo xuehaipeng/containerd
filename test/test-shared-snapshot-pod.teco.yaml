@@ -62,11 +62,11 @@ spec:
               - /bin/sh
               - /scripts/session-restore-wrapper.sh
               - --mappings-file
-              - /path-mappings.json
+              - /etc/path-mappings.json
               - --namespace
               - default
               - --pod-name
-              - nb-test-0
+              - nb-test-teco-0
               - --container-name
               - inference
       schedulerName: "volcano"
