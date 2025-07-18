@@ -50,7 +50,7 @@ spec:
           mountPath: /scripts
           readOnly: true
         - name: sessions
-          mountPath: /sessions
+          mountPath: /etc/sessions
         lifecycle:
           postStart:
             exec:

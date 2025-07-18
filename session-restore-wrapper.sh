@@ -44,8 +44,8 @@ if [ ! -f "/etc/path-mappings.json" ]; then
     log "WARNING: Path mappings file not found at /etc/path-mappings.json"
 fi
 
-if [ ! -d "/sessions" ]; then
-    log "WARNING: Sessions directory not found at /sessions"
+if [ ! -d "/etc/sessions" ]; then
+    log "WARNING: Sessions directory not found at /etc/sessions"
 fi
 
 # Set environment for logging

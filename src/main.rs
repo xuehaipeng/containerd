@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use log::{error, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -25,7 +25,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "/sessions",
+        default_value = "/etc/sessions",
         help = "Base path for session directories inside container"
     )]
     sessions_path: PathBuf,
