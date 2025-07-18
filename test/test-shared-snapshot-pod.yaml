@@ -33,7 +33,7 @@ spec:
         kubernetes.io/hostname: n-d-master3
       containers:
       - name: inference
-        image: business2.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
+        image: business1.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
         command: ["sleep", "99999"]
         workingDir: /
         env:
@@ -74,7 +74,7 @@ spec:
       volumes:
       - name: scripts
         hostPath:
-          path: /root/snap/scripts
+          path: /teco/nb/scripts
           type: Directory
       - name: sessions
         hostPath:
@@ -84,5 +84,5 @@ spec:
       - name: path-mappings
         hostPath:
           # Path mappings file for discovering pod hash and snapshot hash
-          path: /s/.path-mappings.json
+          path: /teco/nb/.path-mappings.json
           type: File
