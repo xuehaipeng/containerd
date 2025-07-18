@@ -30,7 +30,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: dev-node220
       containers:
-      - name: pytorch
+      - name: inference
         image: business1.tecorigin.io:5443/teco_gallery/teco/inference:2.2.0-teco_inferencelm2.2.0-modelzoo
         command: ["sleep", "99999"]
         workingDir: /
@@ -58,20 +58,30 @@ spec:
         lifecycle:
           postStart:
             exec:
-              command: ["/bin/sh", "/scripts/post_start_hook.sh"]
+              command:
+              - /bin/sh
+              - /scripts/session-restore-wrapper.sh
+              - --mappings-file
+              - /path-mappings.json
+              - --namespace
+              - default
+              - --pod-name
+              - nb-test-0
+              - --container-name
+              - inference
       schedulerName: "volcano"
       volumes:
       - name: scripts
         hostPath:
-          path: /tecofs/notebook-pods/scripts
+          path: /tecofs/nb/scripts
           type: Directory
       - name: sessions
         hostPath:
           # Maps to shared storage base - hash-based structure: /s/{pod_hash}/{snapshot_hash}/
-          path: /s
+          path: /shared/nb
           type: Directory
       - name: path-mappings
         hostPath:
           # Path mappings file for discovering pod hash and snapshot hash
-          path: /s/.path-mappings.json
+          path: /shared/nb/.path-mappings.json
           type: File
