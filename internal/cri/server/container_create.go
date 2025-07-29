@@ -492,6 +492,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 		containerd.WithRuntime(runtimeName, runtimeOption),
 		containerd.WithContainerLabels(containerLabels),
 		containerd.WithContainerExtension(crilabels.ContainerMetadataExtension, r.meta),
+		containerd.WithImageName(r.imageID),
 	)
 
 	opts = append(opts, containerd.WithSandbox(r.sandboxID))
