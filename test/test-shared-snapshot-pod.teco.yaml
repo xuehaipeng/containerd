@@ -48,7 +48,7 @@ spec:
             teco.com/gpu: "1"
         volumeMounts:
         - name: scripts
-          mountPath: /scripts
+          mountPath: /etc/scripts
           readOnly: true
         - name: sessions
           mountPath: /etc/sessions
@@ -60,7 +60,7 @@ spec:
             exec:
               command:
               - /bin/sh
-              - /scripts/session-restore-wrapper.sh
+              - /etc/scripts/session-restore-wrapper.sh
               - --mappings-file
               - /etc/path-mappings.json
               - --namespace

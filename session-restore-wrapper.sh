@@ -24,10 +24,10 @@ log "Working directory: $(pwd)"
 log "User: $(whoami)"
 
 # Check if binary exists and is executable
-BINARY_PATH="/scripts/session-restore"
+BINARY_PATH="/etc/scripts/session-restore"
 if [ ! -f "$BINARY_PATH" ]; then
     log "ERROR: Binary not found at $BINARY_PATH"
-    ls -la /scripts/ | tee -a "$LOG_FILE"
+    ls -la /etc/scripts/ | tee -a "$LOG_FILE"
     exit 1
 fi
 
