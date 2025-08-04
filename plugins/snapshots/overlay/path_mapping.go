@@ -272,25 +272,35 @@ func GetPreviousStateDirectories(basePath, namespace, podName, containerName str
 func cleanupNonExistentMappings(basePath string) error {
 	var keysToRemove []string
 
+	log.L.Debugf("Starting cleanup check for %d mappings in basePath: %s", len(globalMappings.Mappings), basePath)
+
 	for key, mapping := range globalMappings.Mappings {
 		// Construct the directory path for this mapping
 		dirPath := filepath.Join(basePath, mapping.PodHash, mapping.SnapshotHash)
 		
 		// Check if the directory exists
 		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+			log.L.Debugf("Directory does not exist, marking for removal: %s", dirPath)
 			keysToRemove = append(keysToRemove, key)
+		} else if err != nil {
+			log.L.Debugf("Error checking directory %s: %v", dirPath, err)
+		} else {
+			log.L.Debugf("Directory exists: %s", dirPath)
 		}
 	}
 
 	// Remove the mappings for non-existent directories
 	removed := 0
 	for _, key := range keysToRemove {
+		mapping := globalMappings.Mappings[key]
+		log.L.Debugf("Removing mapping for %s (snapshot_id: %s)", key, mapping.SnapshotID)
 		delete(globalMappings.Mappings, key)
 		removed++
 	}
 
 	if removed > 0 {
-		log.L.Infof("Cleaned up %d mappings for non-existent directories", removed)
+		log.L.Infof("Cleaned up %d mappings for non-existent directories (total mappings: %d -> %d)", 
+			removed, removed+len(globalMappings.Mappings), len(globalMappings.Mappings))
 	}
 
 	return nil
