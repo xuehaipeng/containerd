@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -68,15 +69,27 @@ func RegisterPathMapping(basePath, podHash, snapshotHash, namespace, podName, co
 	defer globalMappings.mu.Unlock()
 
 	key := fmt.Sprintf("%s/%s", podHash, snapshotHash)
-	globalMappings.Mappings[key] = &PathMapping{
-		PodHash:       podHash,
-		SnapshotHash:  snapshotHash,
-		Namespace:     namespace,
-		PodName:       podName,
-		ContainerName: containerName,
-		SnapshotID:    snapshotID,
-		CreatedAt:     time.Now(),
-		LastAccessed:  time.Now(),
+	
+	// Check if mapping already exists to preserve original created_at
+	if existing, exists := globalMappings.Mappings[key]; exists {
+		// Update existing mapping but preserve created_at
+		existing.Namespace = namespace
+		existing.PodName = podName
+		existing.ContainerName = containerName
+		existing.SnapshotID = snapshotID
+		existing.LastAccessed = time.Now()
+	} else {
+		// Create new mapping
+		globalMappings.Mappings[key] = &PathMapping{
+			PodHash:       podHash,
+			SnapshotHash:  snapshotHash,
+			Namespace:     namespace,
+			PodName:       podName,
+			ContainerName: containerName,
+			SnapshotID:    snapshotID,
+			CreatedAt:     time.Now(),
+			LastAccessed:  time.Now(),
+		}
 	}
 
 	// Save to file
@@ -98,7 +111,7 @@ func savePathMappings(basePath string) error {
 		log.L.Warnf("Failed to cleanup non-existent mappings: %v", err)
 	}
 
-	// Sort mappings by created_at in descending order for consistent ordering
+	// Sort mappings by snapshot_id in descending order for consistent ordering
 	sortedMappings := createSortedMappings()
 
 	data, err := json.MarshalIndent(sortedMappings, "", "  ")
@@ -296,9 +309,17 @@ func createSortedMappings() *PathMappings {
 		entries = append(entries, mappingEntry{key: key, mapping: mapping})
 	}
 
-	// Sort by created_at in descending order (newest first)
+	// Sort by snapshot_id in descending order (newest first)
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].mapping.CreatedAt.After(entries[j].mapping.CreatedAt)
+		idI, errI := strconv.ParseInt(entries[i].mapping.SnapshotID, 10, 64)
+		idJ, errJ := strconv.ParseInt(entries[j].mapping.SnapshotID, 10, 64)
+		
+		// If parsing fails, fallback to string comparison
+		if errI != nil || errJ != nil {
+			return entries[i].mapping.SnapshotID > entries[j].mapping.SnapshotID
+		}
+		
+		return idI > idJ
 	})
 
 	// Create sorted mappings structure
