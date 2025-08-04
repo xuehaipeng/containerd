@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,8 +144,12 @@ func LoadPathMappings(basePath string) error {
 	data, err := os.ReadFile(mappingFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File doesn't exist yet, that's OK
-			log.L.Debugf("Path mappings file does not exist yet: %s", mappingFilePath)
+			// File doesn't exist, try to create one by scanning existing directories
+			log.L.Infof("Path mappings file does not exist, attempting to create from existing directories: %s", mappingFilePath)
+			if err := createMappingsFromDirectories(basePath); err != nil {
+				log.L.WithError(err).Warnf("Failed to create path mappings from existing directories")
+				return nil // Don't fail if we can't create mappings
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to read path mappings: %w", err)
@@ -350,4 +355,80 @@ func createSortedMappings() *PathMappings {
 	}
 
 	return sortedMappings
+}
+
+// createMappingsFromDirectories scans existing directories and creates placeholder mappings
+func createMappingsFromDirectories(basePath string) error {
+	globalMappings.mu.Lock()
+	defer globalMappings.mu.Unlock()
+
+	log.L.Infof("Scanning for existing snapshot directories in %s", basePath)
+
+	// Scan for pod hash directories
+	podDirs, err := os.ReadDir(basePath)
+	if err != nil {
+		return fmt.Errorf("failed to read base directory %s: %w", basePath, err)
+	}
+
+	created := 0
+	for _, podDir := range podDirs {
+		if !podDir.IsDir() || strings.HasPrefix(podDir.Name(), ".") {
+			continue
+		}
+
+		podHash := podDir.Name()
+		podPath := filepath.Join(basePath, podHash)
+
+		// Scan for snapshot hash directories under each pod
+		snapshotDirs, err := os.ReadDir(podPath)
+		if err != nil {
+			log.L.WithError(err).Warnf("Failed to read pod directory %s", podPath)
+			continue
+		}
+
+		for _, snapshotDir := range snapshotDirs {
+			if !snapshotDir.IsDir() || strings.HasPrefix(snapshotDir.Name(), ".") {
+				continue
+			}
+
+			snapshotHash := snapshotDir.Name()
+			snapshotPath := filepath.Join(podPath, snapshotHash)
+
+			// Verify this looks like a valid snapshot directory (has fs and work subdirs)
+			fsPath := filepath.Join(snapshotPath, "fs")
+			workPath := filepath.Join(snapshotPath, "work")
+			
+			if _, err := os.Stat(fsPath); os.IsNotExist(err) {
+				continue
+			}
+			if _, err := os.Stat(workPath); os.IsNotExist(err) {
+				continue
+			}
+
+			// Create placeholder mapping
+			key := fmt.Sprintf("%s/%s", podHash, snapshotHash)
+			if _, exists := globalMappings.Mappings[key]; !exists {
+				globalMappings.Mappings[key] = &PathMapping{
+					PodHash:       podHash,
+					SnapshotHash:  snapshotHash,
+					Namespace:     "unknown", // Cannot reverse-engineer from hash
+					PodName:       "unknown", // Cannot reverse-engineer from hash
+					ContainerName: "unknown", // Cannot reverse-engineer from hash
+					SnapshotID:    "unknown", // Cannot reverse-engineer from hash
+					CreatedAt:     time.Now(),
+					LastAccessed:  time.Now(),
+				}
+				created++
+				log.L.Debugf("Created placeholder mapping for %s", key)
+			}
+		}
+	}
+
+	if created > 0 {
+		log.L.Infof("Created %d placeholder mappings from existing directories", created)
+		// Save the newly created mappings
+		return savePathMappings(basePath)
+	}
+
+	return nil
 }
