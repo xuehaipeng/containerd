@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -92,7 +93,15 @@ func savePathMappings(basePath string) error {
 		return fmt.Errorf("failed to create directory for path mappings: %w", err)
 	}
 
-	data, err := json.MarshalIndent(globalMappings, "", "  ")
+	// Clean up non-existent directories before saving
+	if err := cleanupNonExistentMappings(basePath); err != nil {
+		log.L.Warnf("Failed to cleanup non-existent mappings: %v", err)
+	}
+
+	// Sort mappings by created_at in descending order for consistent ordering
+	sortedMappings := createSortedMappings()
+
+	data, err := json.MarshalIndent(sortedMappings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal path mappings: %w", err)
 	}
@@ -244,4 +253,62 @@ func GetPreviousStateDirectories(basePath, namespace, podName, containerName str
 	}
 
 	return directories, nil
+}
+
+// cleanupNonExistentMappings removes mappings for directories that no longer exist
+func cleanupNonExistentMappings(basePath string) error {
+	var keysToRemove []string
+
+	for key, mapping := range globalMappings.Mappings {
+		// Construct the directory path for this mapping
+		dirPath := filepath.Join(basePath, mapping.PodHash, mapping.SnapshotHash)
+		
+		// Check if the directory exists
+		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+			keysToRemove = append(keysToRemove, key)
+		}
+	}
+
+	// Remove the mappings for non-existent directories
+	removed := 0
+	for _, key := range keysToRemove {
+		delete(globalMappings.Mappings, key)
+		removed++
+	}
+
+	if removed > 0 {
+		log.L.Infof("Cleaned up %d mappings for non-existent directories", removed)
+	}
+
+	return nil
+}
+
+// createSortedMappings creates a sorted version of the mappings for consistent JSON output
+func createSortedMappings() *PathMappings {
+	// Create a slice of mapping entries for sorting
+	type mappingEntry struct {
+		key     string
+		mapping *PathMapping
+	}
+
+	var entries []mappingEntry
+	for key, mapping := range globalMappings.Mappings {
+		entries = append(entries, mappingEntry{key: key, mapping: mapping})
+	}
+
+	// Sort by created_at in descending order (newest first)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].mapping.CreatedAt.After(entries[j].mapping.CreatedAt)
+	})
+
+	// Create sorted mappings structure
+	sortedMappings := &PathMappings{
+		Mappings: make(map[string]*PathMapping),
+	}
+
+	for _, entry := range entries {
+		sortedMappings.Mappings[entry.key] = entry.mapping
+	}
+
+	return sortedMappings
 }
