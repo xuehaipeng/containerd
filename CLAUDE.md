@@ -187,58 +187,63 @@ This branch focuses on optimizing shared snapshots and path mapping for containe
 - **Key Functions**: `getSharedPathBase()`, `hashString()`, `determineUpperPath()`, `determineWorkPath()`
 - **Path Strategy**: Uses hash-based short directory names and proper shared storage base calculation
 
-### 🎯 Issues Resolved:
+### 🛡️ Critical Safeguards:
 
-- ✅ **Mount options too long**: Solved through hash-based short paths (73% reduction in path length)
-- ✅ **Parent path resolution**: Fixed critical bug in path calculation logic
-- ✅ **Container creation failures**: Resolved "no such file or directory" errors
-- ✅ **kubectl exec functionality**: Works perfectly without missing files issues
-- ✅ **Large image support**: Successfully tested with containers having 50+ layers
-- ✅ **Shared storage persistence**: Container state properly preserved across restarts
-- ✅ **Container image field display**: Fixed issue where CRI-created containers showed "-" instead of image reference in `ctr containers list`
+The implementation includes several critical safeguards to prevent accidental data loss:
 
-## Container Image Field Fix Context
+1. **Short Paths Protection**: The `/s/l` directory containing layer snapshots is protected from accidental deletion during cleanup operations
+2. **Path Conflict Detection**: Prevents conflicts between shared storage paths and containerd's internal structure
+3. **Migration Safety**: Graceful handling of transitions between path configurations with fallback mechanisms
+4. **Atomic Operations**: Uses atomic moves and temporary files for critical filesystem operations
 
-The branch successfully addresses a critical issue where some containers showed "-" for the image field when using `ctr containers list`, while others correctly displayed their image reference.
+### 📋 Configuration Example:
 
-### Root Cause Analysis
+To enable short base paths, add the following to your containerd configuration:
 
-The issue stemmed from inconsistent metadata population during container creation:
-
-1. **Core containerd container `Image` field**: Used by `ctr` command (from `core/containers/containers.go`)
-2. **CRI metadata `ImageRef` field**: Used by CRI ListContainers (from `internal/cri/store/container/metadata.go`)
-
-The CRI implementation was populating its own `ImageRef` field but failing to set the core containerd container's `Image` field using the available options:
-- `containerd.WithImage(i Image)` 
-- `containerd.WithImageName(n string)`
-
-This caused the discrepancy where:
-- `ctr containers list` showed "-" because `info.Image` was empty
-- CRI-created containers had proper `ImageRef` in their CRI metadata
-- Containers created via other methods (like `ctr create`) properly set both fields
-
-### Solution Implementation
-
-The fix was implemented by adding the missing `containerd.WithImageName(r.imageID)` option to the container creation options in `internal/cri/server/container_create.go`:
-
-```go
-opts = append(opts,
-    containerd.WithSpec(spec, specOpts...),
-    containerd.WithRuntime(runtimeName, runtimeOption),
-    containerd.WithContainerLabels(containerLabels),
-    containerd.WithContainerExtension(crilabels.ContainerMetadataExtension, r.meta),
-    containerd.WithImageName(r.imageID), // ← THIS LINE WAS ADDED
-)
+```toml
+[plugins."io.containerd.snapshotter.v1.overlayfs"]
+  short_base_paths = true
 ```
 
-### Verification
+For shared storage snapshots, containers must be labeled with:
+```toml
+labels = [
+  "containerd.io/snapshot/use-shared-storage=true",
+  "containerd.io/snapshot/shared-disk-path=/shared/storage/path",
+  "containerd.io/snapshot/k8s-namespace=default",
+  "containerd.io/snapshot/k8s-pod-name=my-pod",
+  "containerd.io/snapshot/k8s-container-name=my-container"
+]
+```
 
-The fix has been successfully tested and verified:
-- Containers created via CRI now correctly display their image reference in `ctr containers list`
-- Both the core containerd `Image` field and CRI `ImageRef` field are consistently populated
-- Shared storage functionality remains intact and unaffected by the fix
-- No regression in existing features or performance
+## Session Restore Functionality
 
-When working on this branch, be aware of both the shared snapshot optimization context and the image field metadata consistency requirements. Test changes thoroughly with both features enabled.
+### Rust Session Restore Tool
 
-Always bear in mind the cross-cutting concerns between shared storage functionality and metadata consistency when making changes to container creation or snapshotting code.
+The repository includes a Rust-based session restore tool (`src/main.rs`) that enables containers to restore their previous state when resuming from shared storage snapshots. This tool is particularly useful for notebook environments where users need to resume their work from a previous session.
+
+Key features of the session restore tool:
+1. **Path Mapping Integration**: Reads the path mappings JSON file to identify previous sessions
+2. **Session Discovery**: Finds available sessions on shared storage based on pod hash
+3. **Content Restoration**: Copies files from previous sessions to restore container state
+4. **Cleanup Operations**: Removes old sessions to manage storage space
+
+### Wrapper and Hook Scripts
+
+- `session-restore-wrapper.sh`: A shell wrapper that provides logging and error handling for the Rust binary
+- `session-restore-hook.sh`: A post-start hook script that can be used in Kubernetes environments
+
+### Usage Example
+
+The tool is typically invoked through a Kubernetes lifecycle hook as shown in `test/test-shared-snapshot-pod.teco.yaml`. The postStart hook executes the wrapper script with parameters identifying the current pod and container.
+
+Example invocation:
+```bash
+/etc/scripts/session-restore-wrapper.sh \
+  --mappings-file /etc/path-mappings.json \
+  --namespace default \
+  --pod-name nb-test-teco-0 \
+  --container-name inference
+```
+
+This functionality enables stateful applications to resume from previous sessions when using shared storage snapshots, providing a seamless user experience in notebook environments.
