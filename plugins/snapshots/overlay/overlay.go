@@ -181,6 +181,11 @@ func (o *snapshotter) getSharedPathBase(info snapshots.Info, id string) (string,
 
 	basePath := filepath.Join(sharedDiskPath, podHash, snapshotHash)
 
+	// Load existing mappings for this shared disk path
+	if err := LoadPathMappings(sharedDiskPath); err != nil {
+		log.L.WithError(err).Warnf("Failed to load existing path mappings from %s", sharedDiskPath)
+	}
+
 	// Register the mapping for debugging
 	if err := RegisterPathMapping(sharedDiskPath, podHash, snapshotHash, kubeNamespace, podName, containerName, id); err != nil {
 		log.L.WithError(err).Warnf("Failed to register path mapping for %s", basePath)

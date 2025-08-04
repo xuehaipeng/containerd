@@ -144,6 +144,7 @@ func LoadPathMappings(basePath string) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// File doesn't exist yet, that's OK
+			log.L.Debugf("Path mappings file does not exist yet: %s", mappingFilePath)
 			return nil
 		}
 		return fmt.Errorf("failed to read path mappings: %w", err)
@@ -152,9 +153,16 @@ func LoadPathMappings(basePath string) error {
 	globalMappings.mu.Lock()
 	defer globalMappings.mu.Unlock()
 
+	// Keep track of existing mappings count
+	existingCount := len(globalMappings.Mappings)
+
 	if err := json.Unmarshal(data, globalMappings); err != nil {
 		return fmt.Errorf("failed to unmarshal path mappings: %w", err)
 	}
+
+	newCount := len(globalMappings.Mappings)
+	log.L.Infof("Loaded path mappings from %s: %d mappings loaded (existing: %d, total: %d)", 
+		mappingFilePath, newCount-existingCount, existingCount, newCount)
 
 	return nil
 }
