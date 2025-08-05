@@ -107,14 +107,37 @@ postStart Hook (session-restore):
 
 ### Building
 
+#### For Maximum Linux Compatibility (Recommended)
+
+Use the provided build script to create statically-linked binaries that work on any Linux system:
+
 ```bash
-# Build release binaries
+# Build compatible binaries (no GLIBC dependencies)
+cd session-manager
+./build-compatible.sh
+
+# Binaries will be in target/compatible/
+ls -la target/compatible/session-backup target/compatible/session-restore
+```
+
+**✅ These binaries work on any Linux distribution:**
+- Ubuntu 16.04+ (including 18.04, 20.04, 22.04, 24.04)
+- CentOS 7+, RHEL 7+, Rocky Linux, AlmaLinux
+- Alpine Linux, Amazon Linux, Debian 9+
+- Any modern Linux system (x86_64)
+
+#### Standard Build (GLIBC-dependent)
+
+```bash
+# Build release binaries (requires matching GLIBC version)
 cd session-manager
 cargo build --release
 
 # Binaries will be in target/release/
 ls -la target/release/session-backup target/release/session-restore
 ```
+
+**⚠️ Note**: Standard builds may have GLIBC compatibility issues on older systems.
 
 ### Session Backup
 
