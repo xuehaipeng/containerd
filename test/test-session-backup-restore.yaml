@@ -62,22 +62,34 @@ spec:
             exec:
               command:
               - /etc/scripts/session-restore
-              - --mappings-file /etc/path-mappings.json
-              - --sessions-path /etc/sessions
-              - --backup-path /etc/backup
-              - --namespace kubecube-workspace-214
-              - --pod-name nb-test-0
-              - --container-name inference
+              - --mappings-file
+              - /etc/path-mappings.json
+              - --sessions-path
+              - /etc/sessions
+              - --backup-path
+              - /etc/backup
+              - --namespace
+              - kubecube-workspace-214
+              - --pod-name
+              - nb-test-0
+              - --container-name
+              - inference
           preStop:
             exec:
               command:
               - /etc/scripts/session-backup
-              - --mappings-file /etc/path-mappings.json
-              - --sessions-path /etc/sessions
-              - --backup-path /etc/backup
-              - --namespace kubecube-workspace-214
-              - --pod-name nb-test-0
-              - --container-name inference
+              - --mappings-file
+              - /etc/path-mappings.json
+              - --sessions-path
+              - /etc/sessions
+              - --backup-path
+              - /etc/backup
+              - --namespace
+              - kubecube-workspace-214
+              - --pod-name
+              - nb-test-0
+              - --container-name
+              - inference
       schedulerName: "volcano"
       volumes:
       - name: scripts
