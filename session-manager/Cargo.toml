@@ -11,6 +11,10 @@ path = "src/bin/session-backup.rs"
 name = "session-restore"
 path = "src/bin/session-restore.rs"
 
+[[bin]]
+name = "test-cleanup-validation"
+path = "src/bin/test-cleanup-validation.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
@@ -22,7 +26,12 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = "1.0"
 walkdir = "2.3"
 which = "6.0"
+filetime = "0.2"
+tempfile = "3.0"
 
 [lib]
 name = "session_manager"
 path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3.0"

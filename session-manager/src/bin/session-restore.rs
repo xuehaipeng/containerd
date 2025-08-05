@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{info, warn, debug};
 use session_manager::*;
+use session_manager::direct_restore::DirectRestoreEngine;
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 
@@ -46,6 +47,9 @@ struct Args {
 
     #[arg(long, help = "Dry run mode - don't actually copy files")]
     dry_run: bool,
+
+    #[arg(long, help = "Use direct container root restoration instead of session directory")]
+    direct_restore: bool,
 }
 
 fn init_file_logging(binary_name: &str) -> Result<()> {
@@ -86,42 +90,7 @@ fn main() -> Result<()> {
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
-
-    // Get current pod information
-    let pod_info = PodInfo::from_args_and_env(
-        args.namespace,
-        args.pod_name,
-        args.container_name,
-    ).with_context(|| "Failed to determine pod information")?;
-
-    info!(
-        "Pod info: namespace={}, pod={}, container={}",
-        pod_info.namespace, pod_info.pod_name, pod_info.container_name
-    );
-
-    // Parse path mappings to find current session
-    let current_session = match find_current_session(&args.mappings_file, &pod_info)? {
-        Some(session) => session,
-        None => {
-            info!("No current session found in path mappings. Nothing to restore.");
-            info!("=== Session Restore Completed (No Session Found) ===");
-            return Ok(());
-        }
-    };
-
-    info!(
-        "Current session: pod_hash={}, snapshot_hash={}, created_at={}",
-        current_session.pod_hash, current_session.snapshot_hash, current_session.created_at
-    );
-
-    // Construct current session directory path
-    let current_session_dir = args.sessions_path
-        .join(&current_session.pod_hash)
-        .join(&current_session.snapshot_hash)
-        .join("fs");
-
-    info!("Current session directory: {}", current_session_dir.display());
-    info!("Backup storage directory: {}", args.backup_path.display());
+    info!("Direct restore mode: {}", args.direct_restore);
 
     // Validate backup storage directory exists and has content
     if !args.backup_path.exists() {
@@ -136,56 +105,114 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Show current session directory status before restore
-    debug!("Current session directory status before restore:");
-    if current_session_dir.exists() {
-        debug!("  Current session directory exists");
-        show_directory_contents(&current_session_dir)?;
-    } else {
-        debug!("  Current session directory does not exist yet");
-    }
-
     // Show backup storage directory contents before restore
     debug!("Backup storage directory contents before restore:");
     show_directory_contents(&args.backup_path)?;
 
-    // Ensure current session directory exists
-    if !args.dry_run {
-        create_directory_with_lock(&current_session_dir)
-            .with_context(|| format!("Failed to create current session directory: {}", current_session_dir.display()))?;
-    } else {
-        info!("DRY RUN: Would create current session directory: {}", current_session_dir.display());
-    }
-
-    // Perform restore
-    info!("Starting restore of session data from {} to {}...", 
-          args.backup_path.display(), current_session_dir.display());
-
-    if !args.dry_run {
-        let result = transfer_data(&args.backup_path, &current_session_dir, args.timeout)
-            .with_context(|| "Failed to restore session data")?;
-        info!("Restore result: {} files copied, {} errors, {} skipped", 
-              result.success_count, result.error_count, result.skipped_count);
+    if args.direct_restore {
+        // Use direct container root restoration
+        info!("Using direct container root restoration approach");
         
-        if !result.errors.is_empty() {
-            warn!("Restore completed with some errors:");
-            for error in &result.errors {
-                warn!("  {}", error);
+        let direct_engine = DirectRestoreEngine::new(args.dry_run, args.timeout);
+        let result = direct_engine.restore_to_container_root(&args.backup_path)
+            .with_context(|| "Failed to perform direct container root restoration")?;
+        
+        info!("Direct restore completed:");
+        info!("  Total files processed: {}", result.total_files);
+        info!("  Successfully restored: {}", result.successful_files);
+        info!("  Skipped files: {}", result.skipped_files);
+        info!("  Failed files: {}", result.failed_files);
+        info!("  Duration: {:?}", result.duration);
+        
+        if result.failed_files > 0 && result.successful_files == 0 {
+            return Err(anyhow::anyhow!("Direct restore failed: {} files failed to restore", result.failed_files));
+        }
+    } else {
+        // Use traditional session directory restoration
+        info!("Using traditional session directory restoration approach");
+        
+        // Get current pod information
+        let pod_info = PodInfo::from_args_and_env(
+            args.namespace,
+            args.pod_name,
+            args.container_name,
+        ).with_context(|| "Failed to determine pod information")?;
+
+        info!(
+            "Pod info: namespace={}, pod={}, container={}",
+            pod_info.namespace, pod_info.pod_name, pod_info.container_name
+        );
+
+        // Parse path mappings to find current session
+        let current_session = match find_current_session(&args.mappings_file, &pod_info)? {
+            Some(session) => session,
+            None => {
+                info!("No current session found in path mappings. Nothing to restore.");
+                info!("=== Session Restore Completed (No Session Found) ===");
+                return Ok(());
             }
-        }
-        
-        if result.error_count > 0 && result.success_count == 0 {
-            return Err(anyhow::anyhow!("Restore failed: {} errors occurred", result.error_count));
-        }
-    } else {
-        info!("DRY RUN: Would copy data from {} to {}", 
-              args.backup_path.display(), current_session_dir.display());
-    }
+        };
 
-    // Show current session directory contents after restore
-    debug!("Current session directory contents after restore:");
-    if current_session_dir.exists() {
-        show_directory_contents(&current_session_dir)?;
+        info!(
+            "Current session: pod_hash={}, snapshot_hash={}, created_at={}",
+            current_session.pod_hash, current_session.snapshot_hash, current_session.created_at
+        );
+
+        // Construct current session directory path
+        let current_session_dir = args.sessions_path
+            .join(&current_session.pod_hash)
+            .join(&current_session.snapshot_hash)
+            .join("fs");
+
+        info!("Current session directory: {}", current_session_dir.display());
+
+        // Show current session directory status before restore
+        debug!("Current session directory status before restore:");
+        if current_session_dir.exists() {
+            debug!("  Current session directory exists");
+            show_directory_contents(&current_session_dir)?;
+        } else {
+            debug!("  Current session directory does not exist yet");
+        }
+
+        // Ensure current session directory exists
+        if !args.dry_run {
+            create_directory_with_lock(&current_session_dir)
+                .with_context(|| format!("Failed to create current session directory: {}", current_session_dir.display()))?;
+        } else {
+            info!("DRY RUN: Would create current session directory: {}", current_session_dir.display());
+        }
+
+        // Perform restore
+        info!("Starting restore of session data from {} to {}...", 
+              args.backup_path.display(), current_session_dir.display());
+
+        if !args.dry_run {
+            let result = transfer_data(&args.backup_path, &current_session_dir, args.timeout)
+                .with_context(|| "Failed to restore session data")?;
+            info!("Restore result: {} files copied, {} errors, {} skipped", 
+                  result.success_count, result.error_count, result.skipped_count);
+            
+            if !result.errors.is_empty() {
+                warn!("Restore completed with some errors:");
+                for error in &result.errors {
+                    warn!("  {}", error);
+                }
+            }
+            
+            if result.error_count > 0 && result.success_count == 0 {
+                return Err(anyhow::anyhow!("Restore failed: {} errors occurred", result.error_count));
+            }
+        } else {
+            info!("DRY RUN: Would copy data from {} to {}", 
+                  args.backup_path.display(), current_session_dir.display());
+        }
+
+        // Show current session directory contents after restore
+        debug!("Current session directory contents after restore:");
+        if current_session_dir.exists() {
+            show_directory_contents(&current_session_dir)?;
+        }
     }
 
     info!("=== Session Restore Completed ===");

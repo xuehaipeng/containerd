@@ -9,6 +9,8 @@ use std::io::{self, Write as IoWrite};
 use std::time::Duration;
 use std::thread;
 
+pub mod direct_restore;
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PathMappings {
     pub mappings: HashMap<String, PathMapping>,
