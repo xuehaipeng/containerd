@@ -3,6 +3,7 @@ use clap::Parser;
 use log::{info, warn, debug};
 use session_manager::*;
 use std::path::PathBuf;
+use std::fs::OpenOptions;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -47,9 +48,36 @@ struct Args {
     dry_run: bool,
 }
 
+fn init_file_logging(binary_name: &str) -> Result<()> {
+    use env_logger::fmt::Target;
+    
+    // Create log file path
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let log_file_path = format!("/tmp/{}-{}.log", binary_name, timestamp);
+    
+    // Create or open log file
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .with_context(|| format!("Failed to create log file: {}", log_file_path))?;
+    
+    // Initialize env_logger with file target and debug level
+    env_logger::Builder::new()
+        .target(Target::Pipe(Box::new(log_file)))
+        .filter_level(log::LevelFilter::Debug)
+        .format_timestamp_secs()
+        .init();
+    
+    // Also log to stderr for immediate feedback
+    eprintln!("Logging to file: {}", log_file_path);
+    
+    Ok(())
+}
 
 fn main() -> Result<()> {
-    env_logger::init();
+    // Initialize file-based logging to /tmp
+    init_file_logging("session-restore")?;
     let args = Args::parse();
 
     info!("=== Session Restore Tool Started ===");
