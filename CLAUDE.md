@@ -216,34 +216,60 @@ labels = [
 ]
 ```
 
-## Session Restore Functionality
+## Session Backup and Restore Functionality
 
-### Rust Session Restore Tool
+### Architecture Overview
 
-The repository includes a Rust-based session restore tool (`src/main.rs`) that enables containers to restore their previous state when resuming from shared storage snapshots. This tool is particularly useful for notebook environments where users need to resume their work from a previous session.
+The session management functionality has been refactored to address limitations with OverlayFS on shared storage systems. The new architecture works as follows:
 
-Key features of the session restore tool:
-1. **Path Mapping Integration**: Reads the path mappings JSON file to identify previous sessions
-2. **Session Discovery**: Finds available sessions on shared storage based on pod hash
-3. **Content Restoration**: Copies files from previous sessions to restore container state
-4. **Cleanup Operations**: Removes old sessions to manage storage space
+1. **Local Session Storage**: Container session data (upperdir) is stored on local filesystems with XFS project quotas for ephemeral storage limiting (handled by the image-server project)
 
-### Wrapper and Hook Scripts
+2. **Path Mappings**: JSON file that maps container identifiers (namespace/pod_name/container_name) to session directories using hash-based paths ({pod_hash}/{snapshot_hash})
 
-- `session-restore-wrapper.sh`: A shell wrapper that provides logging and error handling for the Rust binary
-- `session-restore-hook.sh`: A post-start hook script that can be used in Kubernetes environments
+3. **Backup Storage**: Shared storage with simple directory structure ({namespace}/{pod_name}/{container_name}) used only for backup/restore operations
 
-### Usage Example
+4. **Kubernetes Lifecycle Hooks**: 
+   - **postStart Hook**: Restores session data from shared backup storage to local storage
+   - **preStop Hook**: Backs up session data from local storage to shared backup storage
 
-The tool is typically invoked through a Kubernetes lifecycle hook as shown in `test/test-shared-snapshot-pod.teco.yaml`. The postStart hook executes the wrapper script with parameters identifying the current pod and container.
+### Implementation
 
-Example invocation:
-```bash
-/etc/scripts/session-restore-wrapper.sh \
-  --mappings-file /etc/path-mappings.json \
-  --namespace default \
-  --pod-name nb-test-teco-0 \
-  --container-name inference
-```
+The refactoring has been completed with the following components:
 
-This functionality enables stateful applications to resume from previous sessions when using shared storage snapshots, providing a seamless user experience in notebook environments.
+1. **Enhanced Shell Scripts**: 
+   - `session-backup.sh`: Backup script for postStart hook with JSON parsing and robust file handling
+   - `session-restore.sh`: Restore script for preStop hook with JSON parsing and robust file handling
+
+2. **Kubernetes Configuration**: Updated StatefulSet specifications with proper volume mounts for path mappings, local sessions, and backup storage
+
+3. **JSON Parsing**: Scripts use `jq` to parse path mappings and identify the correct session directory based on namespace/pod_name/container_name
+
+4. **Robust File Handling**: Scripts handle all file types including hidden files, large files, and empty directories using rsync with appropriate options
+
+### Key Features
+
+1. **Precise Session Identification**: Scripts parse JSON path mappings to find the current session by identifying the newest entry (by created_at timestamp) for the specific container
+
+2. **Complete File Handling**: 
+   - Uses rsync with options to handle all file types
+   - Fallback to tar if rsync is not available
+   - Proper handling of read-only files (warnings but no failures)
+   - Support for hidden files, large files, and empty directories
+
+3. **Error Handling**: 
+   - Comprehensive logging
+   - Timeout support
+   - Graceful handling of partial failures
+   - Dry-run mode for testing
+
+4. **Flexible Configuration**: All paths and parameters are configurable via command-line arguments
+
+### Usage
+
+The hook scripts can be used in Kubernetes StatefulSet configurations as shown in `test/test-session-backup-restore.yaml`. The scripts require the following volume mounts:
+
+- Path mappings file (`/etc/path-mappings.json`)
+- Local session directories (`/etc/sessions` mapped from `/shared/nb`)
+- Backup storage directory (`/etc/backup` mapped from `/tecofs/nb-sessions/{namespace}/{pod_name}/{container_name}`)
+
+See `README.session-backup-restore.md` for detailed documentation and usage examples.

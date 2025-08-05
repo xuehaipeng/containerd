@@ -184,15 +184,16 @@ if [[ "$DRY_RUN" == false ]]; then
             log "Debug: Source directory does not exist: $CONTAINER_ROOT_DIR"
         fi
         
-        # Use tar with proper options to preserve everything
+        # Use tar with proper options to preserve everything and handle existing files
         # -c: create archive
         # -f -: write to stdout
         # --exclude: exclude any temporary tar files
         # -p: preserve permissions
         # -h: follow symlinks
         # --xattrs: preserve extended attributes
+        # --overwrite: overwrite existing files
         # .: current directory (all files)
-        (cd "$CONTAINER_ROOT_DIR" && tar -cf - --exclude=".*.tar" -p --xattrs .) | (cd "$BACKUP_STORAGE_PATH" && tar -xf - -p --xattrs) 2>&1 | tee -a "$LOG_FILE"
+        (cd "$CONTAINER_ROOT_DIR" && tar -cf - --exclude=".*.tar" -p --xattrs .) | (cd "$BACKUP_STORAGE_PATH" && tar -xf - -p --xattrs --overwrite) 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
         log "Debug: Tar command completed with exit code: $RESULT"
     fi
