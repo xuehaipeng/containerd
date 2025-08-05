@@ -2,29 +2,29 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: nb-test-teco
+  name: nb-test
   namespace: kubecube-workspace-214
 spec:
   clusterIP: None
   selector:
-    app: nb-test-teco
+    app: nb-test
 
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: nb-test-teco
+  name: nb-test
   namespace: kubecube-workspace-214
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nb-test-teco
-  serviceName: "nb-test-teco"
+      app: nb-test
+  serviceName: "nb-test"
   template:
     metadata:
       labels:
-        app: nb-test-teco
+        app: nb-test
         tenant_id: "1"
     spec:
       nodeSelector:
@@ -61,25 +61,23 @@ spec:
           postStart:
             exec:
               command:
-              - /bin/bash
-              - /etc/scripts/session-restore.sh
-              - --namespace
-              - kubecube-workspace-214
-              - --pod-name
-              - nb-test-teco-0
-              - --container-name
-              - inference
+              - /etc/scripts/session-restore
+              - --mappings-file /etc/path-mappings.json
+              - --sessions-path /etc/sessions
+              - --backup-path /etc/backup
+              - --namespace kubecube-workspace-214
+              - --pod-name nb-test-0
+              - --container-name inference
           preStop:
             exec:
               command:
-              - /bin/bash
-              - /etc/scripts/session-backup.sh
-              - --namespace
-              - kubecube-workspace-214
-              - --pod-name
-              - nb-test-teco-0
-              - --container-name
-              - inference
+              - /etc/scripts/session-backup
+              - --mappings-file /etc/path-mappings.json
+              - --sessions-path /etc/sessions
+              - --backup-path /etc/backup
+              - --namespace kubecube-workspace-214
+              - --pod-name nb-test-0
+              - --container-name inference
       schedulerName: "volcano"
       volumes:
       - name: scripts
@@ -96,5 +94,5 @@ spec:
           type: Directory
       - name: backup-storage
         hostPath:
-          path: /tecofs/nb-sessions/kubecube-workspace-214/nb-test-teco-0/inference
+          path: /tecofs/nb-sessions/kubecube-workspace-214/nb-test-0/inference
           type: Directory

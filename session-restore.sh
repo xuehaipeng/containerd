@@ -1,6 +1,6 @@
 #!/bin/bash
-# Session restore script for preStop hook
-# Restores container session data from shared backup storage to local storage
+# Session restore script for postStart hook
+# Restores container session data from shared backup storage to local session storage
 
 set -euo pipefail
 
@@ -111,23 +111,13 @@ SNAPSHOT_HASH=$(echo "$SESSION_KEY" | cut -d'/' -f2)
 
 log "Found current session: pod_hash=$POD_HASH, snapshot_hash=$SNAPSHOT_HASH"
 
-# Construct local session path (this is the overlayfs upperdir)
-LOCAL_SESSION_DIR="$LOCAL_SESSIONS_PATH/$POD_HASH/$SNAPSHOT_HASH/fs"
+# Construct CURRENT SESSION directory (this is what we restore TO)
+CURRENT_SESSION_DIR="$LOCAL_SESSIONS_PATH/$POD_HASH/$SNAPSHOT_HASH/fs"
 
-# But we need to restore to the actual container root directory
-CONTAINER_ROOT_DIR="/"
-
-log "Local session directory (overlayfs upperdir): $LOCAL_SESSION_DIR"
-log "Container root directory: $CONTAINER_ROOT_DIR"
+log "Current session directory: $CURRENT_SESSION_DIR"
 log "Backup storage directory: $BACKUP_STORAGE_PATH"
 
-# Debug: Show contents of path mappings file for this container
-log "Debug: Path mappings for this container:"
-jq -r --arg ns "$NAMESPACE" --arg pod "$POD_NAME" --arg container "$CONTAINER_NAME" '
-    .mappings | to_entries[] | 
-    select(.value.namespace == $ns and .value.pod_name == $pod and .value.container_name == $container)' "$PATH_MAPPINGS_FILE" 2>/dev/null | tee -a "$LOG_FILE" || true
-
-# Check if backup storage directory exists and has content
+# Validate backup storage directory exists and has content
 if [[ ! -d "$BACKUP_STORAGE_PATH" ]]; then
     log "WARNING: Backup storage directory does not exist: $BACKUP_STORAGE_PATH"
     log "=== Session Restore Completed (No Backup Data) ==="
@@ -140,36 +130,36 @@ if [[ -z "$(ls -A "$BACKUP_STORAGE_PATH" 2>/dev/null)" ]]; then
     exit 0
 fi
 
-# Ensure local session directory exists
+# Ensure current session directory exists
 if [[ "$DRY_RUN" == false ]]; then
-    mkdir -p "$LOCAL_SESSION_DIR"
+    mkdir -p "$CURRENT_SESSION_DIR"
     if [[ $? -ne 0 ]]; then
-        log "ERROR: Failed to create local session directory: $LOCAL_SESSION_DIR"
+        log "ERROR: Failed to create current session directory: $CURRENT_SESSION_DIR"
         exit 1
     fi
 else
-    log "DRY RUN: Would create local session directory: $LOCAL_SESSION_DIR"
+    log "DRY RUN: Would create current session directory: $CURRENT_SESSION_DIR"
 fi
 
-# Debug: Show container root directory status
-if [[ -d "$CONTAINER_ROOT_DIR" ]]; then
-    log "Debug: Container root directory exists"
-    log "Debug: Container root directory contents before restore:"
-    ls -la "$CONTAINER_ROOT_DIR" 2>&1 | tee -a "$LOG_FILE" || true
+# Debug: Show current session directory status before restore
+if [[ -d "$CURRENT_SESSION_DIR" ]]; then
+    log "Debug: Current session directory exists"
+    log "Debug: Current session directory contents before restore:"
+    ls -la "$CURRENT_SESSION_DIR" 2>&1 | tee -a "$LOG_FILE" || true
 else
-    log "Debug: Container root directory does not exist"
+    log "Debug: Current session directory does not exist yet"
 fi
 
-# Debug: Show backup storage directory contents
+# Debug: Show backup storage directory contents before restore
 if [[ -d "$BACKUP_STORAGE_PATH" ]]; then
-    log "Debug: Backup storage directory contents:"
+    log "Debug: Backup storage directory contents before restore:"
     ls -la "$BACKUP_STORAGE_PATH" 2>&1 | tee -a "$LOG_FILE" || true
 else
     log "Debug: Backup storage directory does not exist"
 fi
 
 # Copy session data from backup storage with timeout
-log "Starting restore of session data from $BACKUP_STORAGE_PATH to $CONTAINER_ROOT_DIR..."
+log "Starting restore of session data from $BACKUP_STORAGE_PATH to $CURRENT_SESSION_DIR..."
 
 if [[ "$DRY_RUN" == false ]]; then
     if command -v timeout >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1; then
@@ -184,45 +174,32 @@ if [[ "$DRY_RUN" == false ]]; then
         # --specials: preserve special files
         # --hard-links: preserve hard links
         # --delete: delete extraneous files from dest dirs
-        # --ignore-errors: delete even if I/O errors occur
-        timeout "$TIMEOUT" rsync -a --delete --ignore-errors "$BACKUP_STORAGE_PATH/" "$CONTAINER_ROOT_DIR/" 2>&1 | tee -a "$LOG_FILE"
+        # --ignore-errors: continue even if I/O errors occur (skip problematic files)
+        # --force: force deletion of non-writable files
+        timeout "$TIMEOUT" rsync -a --delete --ignore-errors --force "$BACKUP_STORAGE_PATH/" "$CURRENT_SESSION_DIR/" 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
     elif command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete --ignore-errors "$BACKUP_STORAGE_PATH/" "$CONTAINER_ROOT_DIR/" 2>&1 | tee -a "$LOG_FILE"
+        rsync -a --delete --ignore-errors --force "$BACKUP_STORAGE_PATH/" "$CURRENT_SESSION_DIR/" 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
     else
         # Fallback to tar if rsync is not available
         log "Rsync not available, using tar for restore"
         # Use tar with options to properly handle all files including hidden ones
-        log "Debug: Current working directory before tar: $(pwd)"
-        log "Debug: BACKUP_STORAGE_PATH: $BACKUP_STORAGE_PATH"
-        log "Debug: CONTAINER_ROOT_DIR: $CONTAINER_ROOT_DIR"
-        
-        # Check if source directory exists and has content
-        if [[ -d "$BACKUP_STORAGE_PATH" ]]; then
-            log "Debug: Source directory exists"
-            log "Debug: Source directory contents:"
-            ls -la "$BACKUP_STORAGE_PATH" 2>&1 | tee -a "$LOG_FILE" || true
-        else
-            log "Debug: Source directory does not exist: $BACKUP_STORAGE_PATH"
-        fi
-        
-        # Use tar with proper options to preserve everything and handle existing files
-        # -c: create archive
-        # -f -: write to stdout
-        # --exclude: exclude any temporary tar files
+        # --ignore-failed-read: ignore failed reads (skip problematic files)
+        # --warning=no-file-changed: suppress warnings for changed files
+        # --warning=no-ignore-failed-read: suppress warnings for ignored failed reads
         # -p: preserve permissions
-        # -h: follow symlinks
         # --xattrs: preserve extended attributes
         # --overwrite: overwrite existing files
-        # --keep-old-files: keep existing files and don't overwrite (alternative approach)
+        # --exclude: exclude any temporary tar files
+        # -c: create archive
+        # -f -: write to stdout
         # .: current directory (all files)
-        (cd "$BACKUP_STORAGE_PATH" && tar -cf - --exclude=".*.tar" -p --xattrs .) | (cd "$CONTAINER_ROOT_DIR" && tar -xf - -p --xattrs --overwrite) 2>&1 | tee -a "$LOG_FILE"
+        (cd "$BACKUP_STORAGE_PATH" && tar -cpf - --exclude=".*.tar" --ignore-failed-read --warning=no-file-changed --warning=no-ignore-failed-read -p --xattrs .) | (cd "$CURRENT_SESSION_DIR" && tar -xpf - --overwrite -p --xattrs) 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
-        log "Debug: Tar command completed with exit code: $RESULT"
     fi
 else
-    log "DRY RUN: Would copy data from $BACKUP_STORAGE_PATH to $CONTAINER_ROOT_DIR"
+    log "DRY RUN: Would copy data from $BACKUP_STORAGE_PATH to $CURRENT_SESSION_DIR"
     RESULT=0
 fi
 
@@ -233,17 +210,17 @@ elif [[ $RESULT -eq 124 ]]; then
     exit 1
 else
     log "WARNING: Session restore completed with some errors (exit code: $RESULT)"
-    # Don't exit with error for partial success - some files might be read-only
+    # Don't exit with error for partial success - some files might be read-only or busy
 fi
 
-# Debug: Show container root directory contents after restore
-if [[ -d "$CONTAINER_ROOT_DIR" ]]; then
-    log "Debug: Container root directory contents after restore:"
-    ls -la "$CONTAINER_ROOT_DIR" 2>&1 | tee -a "$LOG_FILE" || true
-    log "Debug: Container root user directory contents after restore:"
-    ls -la "$CONTAINER_ROOT_DIR/root/" 2>&1 | tee -a "$LOG_FILE" || true
+# Debug: Show current session directory contents after restore
+if [[ -d "$CURRENT_SESSION_DIR" ]]; then
+    log "Debug: Current session directory contents after restore:"
+    ls -la "$CURRENT_SESSION_DIR" 2>&1 | tee -a "$LOG_FILE" || true
+    log "Debug: Session root directory contents after restore:"
+    ls -la "$CURRENT_SESSION_DIR/root/" 2>&1 | tee -a "$LOG_FILE" || true
 else
-    log "Debug: Container root directory does not exist after restore"
+    log "Debug: Current session directory still does not exist after restore"
 fi
 
 log "=== Session Restore Completed ==="

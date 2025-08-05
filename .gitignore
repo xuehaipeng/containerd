@@ -20,3 +20,4 @@ docs/.DS_Store
 
 /target
 .claude
+session-manager/target/

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Session backup script for postStart hook
-# Backs up container session data from local storage to shared backup storage
+# Session backup script for preStop hook
+# Backs up container session data from local session storage to shared backup storage
 
 set -euo pipefail
 
@@ -111,26 +111,22 @@ SNAPSHOT_HASH=$(echo "$SESSION_KEY" | cut -d'/' -f2)
 
 log "Found current session: pod_hash=$POD_HASH, snapshot_hash=$SNAPSHOT_HASH"
 
-# Construct local session path (this is the overlayfs upperdir for reference)
-LOCAL_SESSION_DIR="$LOCAL_SESSIONS_PATH/$POD_HASH/$SNAPSHOT_HASH/fs"
+# Construct CURRENT SESSION directory (this is what we backup FROM)
+CURRENT_SESSION_DIR="$LOCAL_SESSIONS_PATH/$POD_HASH/$SNAPSHOT_HASH/fs"
 
-# But we need to backup from the actual container root directory
-CONTAINER_ROOT_DIR="/"
-
-log "Local session directory (overlayfs upperdir): $LOCAL_SESSION_DIR"
-log "Container root directory: $CONTAINER_ROOT_DIR"
+log "Current session directory: $CURRENT_SESSION_DIR"
 log "Backup storage directory: $BACKUP_STORAGE_PATH"
 
-# Validate container root directory exists and has content
-if [[ ! -d "$CONTAINER_ROOT_DIR" ]]; then
-    log "WARNING: Container root directory does not exist: $CONTAINER_ROOT_DIR"
-    log "=== Session Backup Completed (No Container Data) ==="
+# Validate current session directory exists and has content
+if [[ ! -d "$CURRENT_SESSION_DIR" ]]; then
+    log "WARNING: Current session directory does not exist: $CURRENT_SESSION_DIR"
+    log "=== Session Backup Completed (No Current Session Data) ==="
     exit 0
 fi
 
-if [[ -z "$(ls -A "$CONTAINER_ROOT_DIR" 2>/dev/null)" ]]; then
-    log "WARNING: Container root directory is empty: $CONTAINER_ROOT_DIR"
-    log "=== Session Backup Completed (Empty Container Data) ==="
+if [[ -z "$(ls -A "$CURRENT_SESSION_DIR" 2>/dev/null)" ]]; then
+    log "WARNING: Current session directory is empty: $CURRENT_SESSION_DIR"
+    log "=== Session Backup Completed (Empty Current Session Data) ==="
     exit 0
 fi
 
@@ -145,8 +141,24 @@ else
     log "DRY RUN: Would create backup storage directory: $BACKUP_STORAGE_PATH"
 fi
 
+# Debug: Show current session directory contents before backup
+if [[ -d "$CURRENT_SESSION_DIR" ]]; then
+    log "Debug: Current session directory contents before backup:"
+    ls -la "$CURRENT_SESSION_DIR" 2>&1 | tee -a "$LOG_FILE" || true
+else
+    log "Debug: Current session directory does not exist: $CURRENT_SESSION_DIR"
+fi
+
+# Debug: Show backup storage directory contents before backup
+if [[ -d "$BACKUP_STORAGE_PATH" ]]; then
+    log "Debug: Backup storage directory contents before backup:"
+    ls -la "$BACKUP_STORAGE_PATH" 2>&1 | tee -a "$LOG_FILE" || true
+else
+    log "Debug: Backup storage directory does not exist: $BACKUP_STORAGE_PATH"
+fi
+
 # Copy session data to backup storage with timeout
-log "Starting backup of session data from $CONTAINER_ROOT_DIR to $BACKUP_STORAGE_PATH..."
+log "Starting backup of session data from $CURRENT_SESSION_DIR to $BACKUP_STORAGE_PATH..."
 
 if [[ "$DRY_RUN" == false ]]; then
     if command -v timeout >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1; then
@@ -161,44 +173,32 @@ if [[ "$DRY_RUN" == false ]]; then
         # --specials: preserve special files
         # --hard-links: preserve hard links
         # --delete: delete extraneous files from dest dirs
-        # --ignore-errors: delete even if I/O errors occur
-        timeout "$TIMEOUT" rsync -a --delete --ignore-errors "$CONTAINER_ROOT_DIR/" "$BACKUP_STORAGE_PATH/" 2>&1 | tee -a "$LOG_FILE"
+        # --ignore-errors: continue even if I/O errors occur (skip problematic files)
+        # --force: force deletion of non-writable files
+        timeout "$TIMEOUT" rsync -a --delete --ignore-errors --force "$CURRENT_SESSION_DIR/" "$BACKUP_STORAGE_PATH/" 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
     elif command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete --ignore-errors "$CONTAINER_ROOT_DIR/" "$BACKUP_STORAGE_PATH/" 2>&1 | tee -a "$LOG_FILE"
+        rsync -a --delete --ignore-errors --force "$CURRENT_SESSION_DIR/" "$BACKUP_STORAGE_PATH/" 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
     else
         # Fallback to tar if rsync is not available
         log "Rsync not available, using tar for backup"
         # Use tar with options to properly handle all files including hidden ones
-        log "Debug: Current working directory before tar: $(pwd)"
-        log "Debug: CONTAINER_ROOT_DIR: $CONTAINER_ROOT_DIR"
-        log "Debug: BACKUP_STORAGE_PATH: $BACKUP_STORAGE_PATH"
-        
-        # Check if source directory exists and has content
-        if [[ -d "$CONTAINER_ROOT_DIR" ]]; then
-            log "Debug: Source directory exists"
-            log "Debug: Source directory contents:"
-            ls -la "$CONTAINER_ROOT_DIR" 2>&1 | tee -a "$LOG_FILE" || true
-        else
-            log "Debug: Source directory does not exist: $CONTAINER_ROOT_DIR"
-        fi
-        
-        # Use tar with proper options to preserve everything and handle existing files
-        # -c: create archive
-        # -f -: write to stdout
-        # --exclude: exclude any temporary tar files
+        # --ignore-failed-read: ignore failed reads (skip problematic files)
+        # --warning=no-file-changed: suppress warnings for changed files
+        # --warning=no-ignore-failed-read: suppress warnings for ignored failed reads
         # -p: preserve permissions
-        # -h: follow symlinks
         # --xattrs: preserve extended attributes
         # --overwrite: overwrite existing files
+        # --exclude: exclude any temporary tar files
+        # -c: create archive
+        # -f -: write to stdout
         # .: current directory (all files)
-        (cd "$CONTAINER_ROOT_DIR" && tar -cf - --exclude=".*.tar" -p --xattrs .) | (cd "$BACKUP_STORAGE_PATH" && tar -xf - -p --xattrs --overwrite) 2>&1 | tee -a "$LOG_FILE"
+        (cd "$CURRENT_SESSION_DIR" && tar -cpf - --exclude=".*.tar" --ignore-failed-read --warning=no-file-changed --warning=no-ignore-failed-read -p --xattrs .) | (cd "$BACKUP_STORAGE_PATH" && tar -xpf - --overwrite -p --xattrs) 2>&1 | tee -a "$LOG_FILE"
         RESULT=${PIPESTATUS[0]}
-        log "Debug: Tar command completed with exit code: $RESULT"
     fi
 else
-    log "DRY RUN: Would copy data from $CONTAINER_ROOT_DIR to $BACKUP_STORAGE_PATH"
+    log "DRY RUN: Would copy data from $CURRENT_SESSION_DIR to $BACKUP_STORAGE_PATH"
     RESULT=0
 fi
 
@@ -209,14 +209,14 @@ elif [[ $RESULT -eq 124 ]]; then
     exit 1
 else
     log "WARNING: Session backup completed with some errors (exit code: $RESULT)"
-    # Don't exit with error for partial success - some files might be read-only
+    # Don't exit with error for partial success - some files might be read-only or busy
 fi
 
 # Debug: Show backup storage directory contents after backup
 if [[ -d "$BACKUP_STORAGE_PATH" ]]; then
     log "Debug: Backup storage directory contents after backup:"
     ls -la "$BACKUP_STORAGE_PATH" 2>&1 | tee -a "$LOG_FILE" || true
-    log "Debug: Container root user directory contents after backup:"
+    log "Debug: Session root directory contents after backup:"
     ls -la "$BACKUP_STORAGE_PATH/root/" 2>&1 | tee -a "$LOG_FILE" || true
 else
     log "Debug: Backup storage directory does not exist after backup"
