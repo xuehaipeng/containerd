@@ -1088,9 +1088,8 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 				}
 			}
 			// Ensure local snapshot ID marker directory exists
-			// For shared snapshots, always use the original path (not short paths) to avoid conflicts
-			// with layer snapshots in /s/l/
-			ensureLocalSnapshotIDDir := filepath.Join(o.root, "snapshots", s.ID)
+			// Use the configured path mechanism (short or long paths)
+			ensureLocalSnapshotIDDir := filepath.Join(o.getSnapshotsRoot(), s.ID)
 			if _, errStat := os.Stat(ensureLocalSnapshotIDDir); os.IsNotExist(errStat) {
 				if errMk := os.Mkdir(ensureLocalSnapshotIDDir, 0700); errMk != nil {
 					log.G(ctx).WithError(errMk).Warnf("Failed to create local marker directory for shared snapshot %s", s.ID)
