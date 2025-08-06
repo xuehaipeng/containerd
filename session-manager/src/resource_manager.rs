@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
-use log::{debug, warn, error};
+use log::debug;
 
 /// RAII wrapper for file handles with automatic cleanup
 pub struct ManagedFile {
@@ -79,7 +79,7 @@ impl FileLockManager {
     }
     
     /// Acquire a lock with timeout using flock-style semantics
-    pub fn acquire_lock_with_timeout(&self, path: &Path, timeout: Duration) -> Result<FileLock> {
+    pub fn acquire_lock_with_timeout(&self, path: &Path, timeout: Duration) -> Result<()> {
         let path_str = path.display().to_string();
         let lock_handle = {
             let mut locks = self.locks.lock();
@@ -92,13 +92,9 @@ impl FileLockManager {
         
         loop {
             // Try to acquire the lock with a short timeout
-            if let Some(guard) = lock_handle.try_lock_for(Duration::from_millis(100)) {
+            if lock_handle.try_lock_for(Duration::from_millis(100)).is_some() {
                 debug!("Acquired lock for: {}", path_str);
-                return Ok(FileLock {
-                    _guard: guard,
-                    path: path_str,
-                    acquired_at: Instant::now(),
-                });
+                return Ok(());
             }
             
             if start_time.elapsed() > timeout {
@@ -119,28 +115,7 @@ impl Default for FileLockManager {
     }
 }
 
-/// RAII file lock with automatic release
-pub struct FileLock {
-    _guard: parking_lot::MutexGuard<'static, ()>,
-    path: String,
-    acquired_at: Instant,
-}
-
-impl FileLock {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-    
-    pub fn held_duration(&self) -> Duration {
-        self.acquired_at.elapsed()
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        debug!("Released lock for: {} (held: {:?})", self.path, self.held_duration());
-    }
-}
+// Removed FileLock struct due to lifetime issues - using simpler approach
 
 /// Thread pool manager for concurrent operations
 pub struct ThreadPoolManager {

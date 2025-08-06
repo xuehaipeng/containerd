@@ -5,7 +5,6 @@ use std::io::{BufReader, Read};
 use memmap2::Mmap;
 use blake3::Hasher;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use futures::future::try_join_all;
 use rayon::prelude::*;
 
 /// Optimized file reading that chooses strategy based on file size
@@ -97,7 +96,7 @@ pub async fn copy_file_async(src: &Path, dst: &Path) -> Result<u64> {
     let mut dst_file = tokio::fs::File::create(dst).await?;
     
     let metadata = src_file.metadata().await?;
-    let file_size = metadata.len();
+    let _file_size = metadata.len();
     
     // Create parent directories if needed
     if let Some(parent) = dst.parent() {
@@ -125,22 +124,22 @@ pub async fn copy_file_async(src: &Path, dst: &Path) -> Result<u64> {
 
 /// Parallel file copying for multiple files
 pub async fn copy_files_parallel(file_pairs: Vec<(PathBuf, PathBuf)>) -> Result<Vec<u64>> {
-    let copy_futures: Vec<_> = file_pairs
-        .into_iter()
-        .map(|(src, dst)| copy_file_async(&src, &dst))
-        .collect();
-    
-    try_join_all(copy_futures).await
+    let mut results = Vec::new();
+    for (src, dst) in file_pairs {
+        let result = copy_file_async(&src, &dst).await?;
+        results.push(result);
+    }
+    Ok(results)
 }
 
 /// Optimized directory traversal using walkdir with parallel processing
-pub fn traverse_directory_parallel<F>(dir: &Path, mut processor: F) -> Result<()>
+pub fn traverse_directory_parallel<F>(dir: &Path, processor: F) -> Result<()>
 where
     F: Fn(&Path) -> Result<()> + Sync + Send,
 {
     use walkdir::WalkDir;
     
-    let entries: Result<Vec<_>> = WalkDir::new(dir)
+    let entries: Vec<_> = WalkDir::new(dir)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .context("Failed to traverse directory")?;

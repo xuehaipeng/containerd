@@ -12,11 +12,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use lru::LruCache;
 use once_cell::sync::Lazy;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use futures::future::try_join_all;
-use rayon::prelude::*;
-use blake3::Hasher;
-use memmap2::Mmap;
+// Removed unused imports
 use std::num::NonZeroUsize;
 
 pub mod direct_restore;
@@ -35,7 +31,7 @@ pub struct PathMappings {
     pub mappings: HashMap<String, PathMapping>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PathMapping {
     #[serde(default = "default_namespace")]
     pub namespace: String,

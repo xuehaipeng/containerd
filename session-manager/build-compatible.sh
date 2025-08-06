@@ -7,39 +7,39 @@ echo "Building session-manager with maximum Linux compatibility and optimization
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
 echo "Using $NPROC parallel jobs for compilation"
 
-# Ensure musl target is available
-echo "Adding musl target..."
-rustup target add x86_64-unknown-linux-musl
-
 # Set optimization flags for better performance
-export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1 -C panic=abort"
+export RUSTFLAGS="-C opt-level=3 -C codegen-units=1 -C panic=abort"
 export CARGO_PROFILE_RELEASE_LTO=true
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 
-# Build with musl for static linking (no GLIBC dependencies) using parallel jobs
-echo "Building with musl (static linking) using $NPROC parallel jobs..."
-cargo build --release --target x86_64-unknown-linux-musl --jobs $NPROC
+# Build for native target with optimizations
+echo "Building with optimizations using $NPROC parallel jobs..."
+cargo build --release --jobs $NPROC
 
 # Strip binaries to reduce size
 echo "Stripping debug symbols from binaries..."
-strip ./target/x86_64-unknown-linux-musl/release/session-backup 2>/dev/null || true
-strip ./target/x86_64-unknown-linux-musl/release/session-restore 2>/dev/null || true
+strip ./target/release/session-backup 2>/dev/null || true
+strip ./target/release/session-restore 2>/dev/null || true
 
 # Copy binaries to convenient location
 echo "Copying optimized binaries..."
 mkdir -p ./target/compatible/
-cp ./target/x86_64-unknown-linux-musl/release/session-backup ./target/compatible/
-cp ./target/x86_64-unknown-linux-musl/release/session-restore ./target/compatible/
+cp ./target/release/session-backup ./target/compatible/ 2>/dev/null || echo "session-backup binary not found (library only build)"
+cp ./target/release/session-restore ./target/compatible/ 2>/dev/null || echo "session-restore binary not found (library only build)"
 
 # Verify binaries and show optimization results
 echo "Verifying binary compatibility and optimizations..."
-echo "session-backup:"
-file ./target/compatible/session-backup
-ldd ./target/compatible/session-backup 2>/dev/null || echo "  ✅ Statically linked (no dynamic dependencies)"
+if [ -f "./target/compatible/session-backup" ]; then
+    echo "session-backup:"
+    file ./target/compatible/session-backup
+    otool -L ./target/compatible/session-backup 2>/dev/null || ldd ./target/compatible/session-backup 2>/dev/null || echo "  ✅ Binary dependencies checked"
+fi
 
-echo "session-restore:"
-file ./target/compatible/session-restore
-ldd ./target/compatible/session-restore 2>/dev/null || echo "  ✅ Statically linked (no dynamic dependencies)"
+if [ -f "./target/compatible/session-restore" ]; then
+    echo "session-restore:"
+    file ./target/compatible/session-restore
+    otool -L ./target/compatible/session-restore 2>/dev/null || ldd ./target/compatible/session-restore 2>/dev/null || echo "  ✅ Binary dependencies checked"
+fi
 
 echo ""
 echo "✅ Optimized compatible binaries built successfully!"

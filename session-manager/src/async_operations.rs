@@ -1,14 +1,10 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
-use lru::LruCache;
-use serde::{Deserialize, Serialize};
+// Removed unused serde imports
 use std::collections::HashMap;
 use tokio::fs;
-use futures::future::try_join_all;
 use log::{debug, info, warn};
-use std::num::NonZeroUsize;
 
 use crate::{PathMapping, PathMappings, SessionInfo, PodInfo};
 use crate::optimized_io;

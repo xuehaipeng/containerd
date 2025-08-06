@@ -7,9 +7,7 @@ use std::io;
 use std::time::{Duration, SystemTime};
 use std::thread;
 use rayon::prelude::*;
-use crate::optimized_io;
-use crate::resource_manager::{ResourceManager, ManagedFile};
-use crate::async_operations::AsyncBatchOperations;
+use crate::resource_manager::ResourceManager;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DirectRestoreResult {
@@ -620,11 +618,11 @@ impl DirectRestoreEngine {
                 Ok(file_outcome) => {
                     match file_outcome {
                         FileProcessOutcome::Success => result.successful_files += 1,
-                        FileProcessOutcome::Skipped(reason) => {
+                        FileProcessOutcome::Skipped(_reason) => {
                             result.skipped_files += 1;
                             // Add to skipped details would need the path, which we'd need to track
                         }
-                        FileProcessOutcome::Failed(error) => {
+                        FileProcessOutcome::Failed(_error) => {
                             result.failed_files += 1;
                             // Add to failed details would need the path
                         }
