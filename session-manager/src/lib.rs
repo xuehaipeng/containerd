@@ -547,14 +547,256 @@ pub fn transfer_data_with_mount_bypass(source: &Path, target: &Path, timeout: u6
     if bypass_mounts {
         info!("Mount bypass enabled - detecting mounted paths");
         let mounted_paths = get_mounted_paths()?;
-        transfer_data_with_exclusions(source, target, timeout, &mounted_paths)
+        transfer_data_with_exclusions_robust(source, target, timeout, &mounted_paths)
     } else {
         transfer_data(source, target, timeout)
     }
 }
 
-/// Transfer data excluding mounted paths using rsync exclusions
-fn transfer_data_with_exclusions(source: &Path, target: &Path, timeout: u64, mounted_paths: &HashSet<PathBuf>) -> Result<TransferResult> {
+/// Robust transfer with multiple fallback strategies
+fn transfer_data_with_exclusions_robust(source: &Path, target: &Path, timeout: u64, mounted_paths: &HashSet<PathBuf>) -> Result<TransferResult> {
+    // Try rsync first if available
+    if which::which("rsync").is_ok() {
+        info!("Using rsync for transfer with mount exclusions");
+        match transfer_data_with_exclusions_rsync(source, target, timeout, mounted_paths) {
+            Ok(result) if result.error_count == 0 => return Ok(result),
+            Ok(result) => {
+                warn!("Rsync completed with errors, trying native fallback");
+                debug!("Rsync errors: {:?}", result.errors);
+            }
+            Err(e) => {
+                warn!("Rsync failed: {}, trying native fallback", e);
+            }
+        }
+    } else {
+        info!("rsync not available, using native file operations");
+    }
+    
+    // Fall back to native Rust file operations
+    transfer_data_with_exclusions_native(source, target, timeout, mounted_paths)
+}
+
+/// Native Rust file copying with mount exclusions
+fn transfer_data_with_exclusions_native(source: &Path, target: &Path, timeout: u64, mounted_paths: &HashSet<PathBuf>) -> Result<TransferResult> {
+    let mut result = TransferResult {
+        success_count: 0,
+        error_count: 0,
+        skipped_count: 0,
+        errors: Vec::new(),
+    };
+
+    info!("Using native file operations with mount exclusions from {} to {}", source.display(), target.display());
+    
+    let start_time = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(timeout);
+    
+    // Create target directory if it doesn't exist
+    if !target.exists() {
+        fs::create_dir_all(target)
+            .with_context(|| format!("Failed to create target directory: {}", target.display()))?;
+    }
+    
+    // Recursively copy files with mount exclusions
+    copy_directory_recursive(source, target, source, mounted_paths, &mut result, start_time, timeout_duration)?;
+    
+    if result.success_count > 0 || (result.success_count == 0 && result.error_count == 0) {
+        info!("Native transfer completed successfully: {} files copied, {} skipped, {} errors", 
+              result.success_count, result.skipped_count, result.error_count);
+    }
+    
+    Ok(result)
+}
+
+/// Recursively copy directory contents with exclusions
+fn copy_directory_recursive(
+    current_source: &Path,
+    current_target: &Path, 
+    source_root: &Path,
+    mounted_paths: &HashSet<PathBuf>,
+    result: &mut TransferResult,
+    start_time: std::time::Instant,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    // Check timeout
+    if start_time.elapsed() > timeout {
+        result.errors.push("Operation timed out".to_string());
+        result.error_count += 1;
+        return Err(anyhow::anyhow!("Transfer operation timed out"));
+    }
+    
+    let entries = match fs::read_dir(current_source) {
+        Ok(entries) => entries,
+        Err(e) => {
+            let error_msg = format!("Failed to read directory {}: {}", current_source.display(), e);
+            warn!("{}", error_msg);
+            result.errors.push(error_msg);
+            result.error_count += 1;
+            return Ok(()); // Continue with other directories
+        }
+    };
+    
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                let error_msg = format!("Failed to read directory entry in {}: {}", current_source.display(), e);
+                warn!("{}", error_msg);
+                result.errors.push(error_msg);
+                result.error_count += 1;
+                continue;
+            }
+        };
+        
+        let source_path = entry.path();
+        let file_name = entry.file_name();
+        let target_path = current_target.join(&file_name);
+        
+        // Check if this path should be excluded (mounted path)
+        if is_path_excluded(&source_path, source_root, mounted_paths) {
+            debug!("Skipping mounted path: {}", source_path.display());
+            result.skipped_count += 1;
+            continue;
+        }
+        
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                let error_msg = format!("Failed to get metadata for {}: {}", source_path.display(), e);
+                warn!("{}", error_msg);
+                result.errors.push(error_msg);
+                result.error_count += 1;
+                continue;
+            }
+        };
+        
+        if metadata.is_dir() {
+            // Create target directory
+            if let Err(e) = fs::create_dir_all(&target_path) {
+                let error_msg = format!("Failed to create directory {}: {}", target_path.display(), e);
+                warn!("{}", error_msg);
+                result.errors.push(error_msg);
+                result.error_count += 1;
+                continue;
+            }
+            
+            // Recursively copy directory contents
+            copy_directory_recursive(&source_path, &target_path, source_root, mounted_paths, result, start_time, timeout)?;
+        } else if metadata.is_file() {
+            // Copy file
+            match copy_file_with_permissions(&source_path, &target_path) {
+                Ok(_) => {
+                    result.success_count += 1;
+                    debug!("Copied file: {} -> {}", source_path.display(), target_path.display());
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to copy file {} to {}: {}", source_path.display(), target_path.display(), e);
+                    warn!("{}", error_msg);
+                    result.errors.push(error_msg);
+                    result.error_count += 1;
+                }
+            }
+        } else if metadata.file_type().is_symlink() {
+            // Handle symlinks
+            match copy_symlink(&source_path, &target_path) {
+                Ok(_) => {
+                    result.success_count += 1;
+                    debug!("Copied symlink: {} -> {}", source_path.display(), target_path.display());
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to copy symlink {} to {}: {}", source_path.display(), target_path.display(), e);
+                    warn!("{}", error_msg);
+                    result.errors.push(error_msg);
+                    result.error_count += 1;
+                }
+            }
+        } else {
+            // Skip special files (devices, pipes, etc.)
+            debug!("Skipping special file: {}", source_path.display());
+            result.skipped_count += 1;
+        }
+        
+        // Check timeout periodically
+        if start_time.elapsed() > timeout {
+            result.errors.push("Operation timed out".to_string());
+            result.error_count += 1;
+            return Err(anyhow::anyhow!("Transfer operation timed out"));
+        }
+    }
+    
+    Ok(())
+}
+
+/// Check if a path should be excluded based on mount points
+fn is_path_excluded(file_path: &Path, source_root: &Path, mounted_paths: &HashSet<PathBuf>) -> bool {
+    // Get the path relative to source root to check against mounted paths
+    if let Ok(relative_path) = file_path.strip_prefix(source_root) {
+        let absolute_path = PathBuf::from("/").join(relative_path);
+        
+        // Check if this absolute path or any of its parents is mounted
+        if is_path_mounted(&absolute_path, mounted_paths) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Copy a file preserving permissions and metadata
+fn copy_file_with_permissions(source: &Path, target: &Path) -> Result<()> {
+    // Create parent directory if needed
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory for: {}", target.display()))?;
+    }
+    
+    // Copy the file
+    fs::copy(source, target)
+        .with_context(|| format!("Failed to copy file from {} to {}", source.display(), target.display()))?;
+    
+    // Copy permissions
+    #[cfg(unix)]
+    {
+        let metadata = source.metadata()
+            .with_context(|| format!("Failed to get metadata for: {}", source.display()))?;
+        let permissions = metadata.permissions();
+        fs::set_permissions(target, permissions)
+            .with_context(|| format!("Failed to set permissions for: {}", target.display()))?;
+    }
+    
+    Ok(())
+}
+
+/// Copy a symlink
+fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
+    let link_target = fs::read_link(source)
+        .with_context(|| format!("Failed to read symlink: {}", source.display()))?;
+    
+    // Remove target if it exists
+    if target.exists() {
+        fs::remove_file(target)
+            .with_context(|| format!("Failed to remove existing target: {}", target.display()))?;
+    }
+    
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&link_target, target)
+        .with_context(|| format!("Failed to create symlink from {} to {}", link_target.display(), target.display()))?;
+    
+    #[cfg(windows)]
+    {
+        if link_target.is_dir() {
+            std::os::windows::fs::symlink_dir(&link_target, target)
+                .with_context(|| format!("Failed to create directory symlink from {} to {}", link_target.display(), target.display()))?;
+        } else {
+            std::os::windows::fs::symlink_file(&link_target, target)
+                .with_context(|| format!("Failed to create file symlink from {} to {}", link_target.display(), target.display()))?;
+        }
+    }
+    
+    Ok(())
+}
+
+/// Transfer data excluding mounted paths using rsync (fallback)
+fn transfer_data_with_exclusions_rsync(source: &Path, target: &Path, timeout: u64, mounted_paths: &HashSet<PathBuf>) -> Result<TransferResult> {
     let mut result = TransferResult {
         success_count: 0,
         error_count: 0,
