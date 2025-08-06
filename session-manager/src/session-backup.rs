@@ -46,6 +46,9 @@ struct Args {
 
     #[arg(long, help = "Dry run mode - don't actually copy files")]
     dry_run: bool,
+
+    #[arg(long, default_value = "true", help = "Whether to bypass mounted paths during backup")]
+    bypass_mounts: bool,
 }
 
 fn init_file_logging(binary_name: &str) -> Result<()> {
@@ -86,6 +89,7 @@ fn main() -> Result<()> {
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
+    info!("Bypass mounts: {}", args.bypass_mounts);
 
     // Initialize Tokio runtime for async operations
     let rt = tokio::runtime::Runtime::new()
@@ -161,13 +165,13 @@ fn main() -> Result<()> {
             info!("DRY RUN: Would create backup storage directory: {}", args.backup_path.display());
         }
 
-        // Perform optimized async backup
-        info!("Starting optimized async backup of session data from {} to {}...", 
+        // Perform optimized backup with mount bypass option
+        info!("Starting optimized backup of session data from {} to {}...", 
               current_session_dir.display(), args.backup_path.display());
 
         if !args.dry_run {
-            // Use optimized parallel transfer
-            let result = session_manager::transfer_data_parallel(&current_session_dir, &args.backup_path, args.timeout).await
+            // Use optimized transfer with mount bypass capability
+            let result = session_manager::transfer_data_with_mount_bypass(&current_session_dir, &args.backup_path, args.timeout, args.bypass_mounts)
                 .with_context(|| "Failed to backup session data with optimized transfer")?;
             
             info!("Optimized backup result: {} files copied, {} errors, {} skipped", 
@@ -184,8 +188,9 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("Optimized backup failed: {} errors occurred", result.error_count));
             }
         } else {
-            info!("DRY RUN: Would copy data from {} to {} using optimized async operations", 
-                  current_session_dir.display(), args.backup_path.display());
+            info!("DRY RUN: Would copy data from {} to {} using optimized operations{}", 
+                  current_session_dir.display(), args.backup_path.display(),
+                  if args.bypass_mounts { " with mount bypass" } else { "" });
         }
 
         // Show backup storage directory contents after backup

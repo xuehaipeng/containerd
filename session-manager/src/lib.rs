@@ -14,6 +14,7 @@ use lru::LruCache;
 use once_cell::sync::Lazy;
 // Removed unused imports
 use std::num::NonZeroUsize;
+use std::collections::HashSet;
 
 pub mod direct_restore;
 mod optimized_io;
@@ -494,4 +495,129 @@ pub fn verify_file_integrity(file1: &Path, file2: &Path) -> Result<bool> {
         let hash2 = optimized_io::hash_file_parallel(file2)?;
         Ok(hash1 == hash2)
     })
+}
+
+/// Detect mounted paths by parsing /proc/mounts and return them as a HashSet
+pub fn get_mounted_paths() -> Result<HashSet<PathBuf>> {
+    let mut mounted_paths = HashSet::new();
+    
+    let mounts_content = fs::read_to_string("/proc/mounts")
+        .context("Failed to read /proc/mounts")?;
+    
+    for line in mounts_content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let mount_point = parts[1];
+            // Skip root filesystem mount
+            if mount_point != "/" {
+                mounted_paths.insert(PathBuf::from(mount_point));
+            }
+        }
+    }
+    
+    info!("Detected {} mounted paths (excluding root /)", mounted_paths.len());
+    debug!("Mounted paths: {:?}", mounted_paths);
+    
+    Ok(mounted_paths)
+}
+
+/// Check if a path or any of its parents are mounted
+pub fn is_path_mounted(path: &Path, mounted_paths: &HashSet<PathBuf>) -> bool {
+    // Check if the exact path is mounted
+    if mounted_paths.contains(path) {
+        return true;
+    }
+    
+    // Check if any parent directory is a mount point
+    for ancestor in path.ancestors() {
+        if mounted_paths.contains(ancestor) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Transfer data with mount bypassing capability
+pub fn transfer_data_with_mount_bypass(source: &Path, target: &Path, timeout: u64, bypass_mounts: bool) -> Result<TransferResult> {
+    // Validate paths for security
+    validate_path_security(source, &PathBuf::from("/"))?;
+    validate_path_security(target, &PathBuf::from("/"))?;
+    
+    if bypass_mounts {
+        info!("Mount bypass enabled - detecting mounted paths");
+        let mounted_paths = get_mounted_paths()?;
+        transfer_data_with_exclusions(source, target, timeout, &mounted_paths)
+    } else {
+        transfer_data(source, target, timeout)
+    }
+}
+
+/// Transfer data excluding mounted paths using rsync exclusions
+fn transfer_data_with_exclusions(source: &Path, target: &Path, timeout: u64, mounted_paths: &HashSet<PathBuf>) -> Result<TransferResult> {
+    let mut result = TransferResult {
+        success_count: 0,
+        error_count: 0,
+        skipped_count: 0,
+        errors: Vec::new(),
+    };
+
+    info!("Using rsync with mount exclusions from {} to {}", source.display(), target.display());
+    
+    let mut cmd = Command::new("timeout");
+    cmd.arg(timeout.to_string())
+       .arg("rsync")
+       .arg("-av")
+       .arg("--delete")
+       .arg("--ignore-errors")
+       .arg("--force")
+       .arg("--stats");
+    
+    // Add exclusions for mounted paths that are within the source directory
+    for mount_path in mounted_paths {
+        // Only exclude if mount is within source directory
+        if let Ok(relative_path) = mount_path.strip_prefix(source) {
+            let exclude_pattern = format!("/{}", relative_path.display());
+            cmd.arg("--exclude").arg(&exclude_pattern);
+            info!("Excluding mounted path: {}", exclude_pattern);
+        }
+    }
+    
+    cmd.arg(format!("{}/", source.display()))
+       .arg(format!("{}/", target.display()));
+
+    let output = cmd.output()
+        .with_context(|| "Failed to execute rsync command with exclusions")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    debug!("Rsync stdout: {}", stdout);
+    
+    if output.status.success() {
+        info!("Rsync transfer with mount exclusions completed successfully");
+        result.success_count = 1;
+    } else {
+        match output.status.code() {
+            Some(124) => {
+                result.errors.push("Operation timed out".to_string());
+                result.error_count += 1;
+            }
+            Some(code) => {
+                warn!("Rsync transfer completed with exit code {}: {}", code, stderr);
+                result.errors.push(format!("Rsync exit code {}: {}", code, stderr));
+                if code < 12 { // rsync exit codes < 12 are usually warnings
+                    result.success_count = 1;
+                } else {
+                    result.error_count += 1;
+                }
+            }
+            None => {
+                result.errors.push("Rsync was terminated by signal".to_string());
+                result.error_count += 1;
+            }
+        }
+    }
+
+    Ok(result)
 }
