@@ -42,7 +42,7 @@ struct Args {
     #[arg(long, help = "Current container name")]
     container_name: Option<String>,
 
-    #[arg(long, default_value = "300", help = "Operation timeout in seconds")]
+    #[arg(long, default_value = "900", help = "Operation timeout in seconds")]
     timeout: u64,
 
     #[arg(long, help = "Dry run mode - don't actually copy files")]
