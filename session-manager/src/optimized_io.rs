@@ -121,36 +121,3 @@ pub async fn copy_file_async(src: &Path, dst: &Path) -> Result<u64> {
     dst_file.sync_all().await?;
     Ok(total_copied)
 }
-
-/// Parallel file copying for multiple files
-pub async fn copy_files_parallel(file_pairs: Vec<(PathBuf, PathBuf)>) -> Result<Vec<u64>> {
-    let mut results = Vec::new();
-    for (src, dst) in file_pairs {
-        let result = copy_file_async(&src, &dst).await?;
-        results.push(result);
-    }
-    Ok(results)
-}
-
-/// Optimized directory traversal using walkdir with parallel processing
-pub fn traverse_directory_parallel<F>(dir: &Path, processor: F) -> Result<()>
-where
-    F: Fn(&Path) -> Result<()> + Sync + Send,
-{
-    use walkdir::WalkDir;
-    
-    let entries: Vec<_> = WalkDir::new(dir)
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to traverse directory")?;
-    
-    // Process files in parallel
-    entries
-        .into_par_iter()
-        .filter(|entry| entry.file_type().is_file())
-        .try_for_each(|entry| processor(entry.path()))?;
-    
-    Ok(())
-}
-
-use std::path::PathBuf;
