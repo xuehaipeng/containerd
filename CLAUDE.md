@@ -180,12 +180,20 @@ This branch focuses on optimizing shared snapshots and path mapping for containe
    - Integration with existing overlay plugin architecture
    - Backward compatibility with existing configurations
 
+7. **Automatic Session Backup Directory Creation**: Integrated automatic creation of session backup directories:
+   - New config option: `session_backup_base_path` in CRI runtime configuration
+   - Automatically creates directory structure: `{session_backup_base_path}/{namespace}/{pod_name}/{container_name}`
+   - Only applies to containers using shared snapshots that match namespace/pod name regex patterns
+   - Seamlessly integrates with existing Rust-based session backup/restore system
+   - Handles pod restarts gracefully - preserves existing backup directories and session data
+
 ### 🔧 Technical Implementation:
 
-- **Files Modified**: `plugins/snapshots/overlay/overlay.go`, `plugins/snapshots/overlay/plugin/plugin.go`
+- **Files Modified**: `plugins/snapshots/overlay/overlay.go`, `plugins/snapshots/overlay/plugin/plugin.go`, `internal/cri/config/config.go`, `internal/cri/server/container_create.go`
 - **Files Added**: `plugins/snapshots/overlay/path_mapping.go`
 - **Key Functions**: `getSharedPathBase()`, `hashString()`, `determineUpperPath()`, `determineWorkPath()`
 - **Path Strategy**: Uses hash-based short directory names and proper shared storage base calculation
+- **Session Backup Integration**: Automatic directory creation in `container_create.go` using `os.MkdirAll()` for idempotent operation
 
 ### 🛡️ Critical Safeguards:
 
@@ -205,7 +213,20 @@ To enable short base paths, add the following to your containerd configuration:
   short_base_paths = true
 ```
 
-For shared storage snapshots, containers must be labeled with:
+For shared storage snapshots and automatic session backup directory creation:
+
+```toml
+[plugins."io.containerd.cri.v1.runtime"]
+  # Shared snapshot configuration
+  shared_snapshot_path = "/shared/nb"
+  shared_snapshot_namespace_regex = "kubecube-workspace-.*"
+  shared_snapshot_pod_name_regex = "^nb-.*"
+  
+  # Automatic session backup directory creation
+  session_backup_base_path = "/tecofs/nb-sessions"
+```
+
+For containers using shared snapshots, they must be labeled with:
 ```toml
 labels = [
   "containerd.io/snapshot/use-shared-storage=true",
@@ -215,6 +236,11 @@ labels = [
   "containerd.io/snapshot/k8s-container-name=my-container"
 ]
 ```
+
+When both shared snapshots and session backup are configured, backup directories are automatically created as:
+`/tecofs/nb-sessions/{namespace}/{pod_name}/{container_name}`
+
+**Pod Restart Behavior**: The automatic directory creation uses `os.MkdirAll()` which gracefully handles existing directories, preserving any previous session data during pod restarts.
 
 ## Session Backup and Restore Functionality
 

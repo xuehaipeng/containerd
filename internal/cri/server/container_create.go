@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -417,6 +418,16 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 				customLabels[crilabels.LabelUseSharedStorage] = "true"
 				sOpts = append(sOpts, snapshots.WithLabels(customLabels))
 				log.G(r.ctx).Infof("Preparing snapshot for container %s with custom shared storage labels: %+v", r.containerID, customLabels)
+				
+				// Automatically create session backup directory if configured
+				if c.config.RuntimeConfig.SessionBackupBasePath != "" {
+					backupDir := filepath.Join(c.config.RuntimeConfig.SessionBackupBasePath, kubeNamespace, podName, r.containerName)
+					if err := os.MkdirAll(backupDir, 0755); err != nil {
+						log.G(r.ctx).WithError(err).Warnf("Failed to create session backup directory: %s", backupDir)
+					} else {
+						log.G(r.ctx).Infof("Created session backup directory for container %s: %s", r.containerID, backupDir)
+					}
+				}
 			}
 		} else {
 			log.G(r.ctx).Warnf("Pod or container metadata is nil")

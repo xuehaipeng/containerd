@@ -437,6 +437,11 @@ type RuntimeConfig struct {
 	// SharedSnapshotPodNameRegex is an optional regex. If set, only pods with
 	// names matching this pattern will use the shared snapshot feature.
 	SharedSnapshotPodNameRegex string `toml:"shared_snapshot_pod_name_regex" json:"sharedSnapshotPodNameRegex"`
+	// SessionBackupBasePath is the base path for automatic session backup directory creation.
+	// When set, backup directories will be automatically created in the format:
+	// {session_backup_base_path}/{namespace}/{pod_name}/{container_name}
+	// Only applies to containers that use shared snapshots and match the regex patterns.
+	SessionBackupBasePath string `toml:"session_backup_base_path" json:"sessionBackupBasePath"`
 }
 
 // X509KeyPairStreaming contains the x509 configuration for streaming
