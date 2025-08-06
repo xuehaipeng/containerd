@@ -277,16 +277,17 @@ bin/containerd-shim-runc-v2: cmd/containerd-shim-runc-v2 FORCE # set !cgo and om
 	@echo "$(WHALE) $@"
 	CGO_ENABLED=${SHIM_CGO_ENABLED} $(GO) build ${GO_BUILD_FLAGS} -o $@ ${SHIM_GO_LDFLAGS} ${SHIM_GO_TAGS} ./cmd/containerd-shim-runc-v2
 
-binaries: $(BINARIES) session-restore ## build binaries
+binaries: $(BINARIES) ## build binaries
 	@echo "$(WHALE) $@"
 
 session-restore: ## build session-restore Rust binary
 	@echo "$(WHALE) $@"
 	@if command -v cargo >/dev/null 2>&1; then \
-		cargo build --release --target x86_64-unknown-linux-musl; \
-		cp target/x86_64-unknown-linux-musl/release/session-restore bin/session-restore; \
+		session-manager/build-compatible.sh; \
+		cp session-manager/target/compatible/session-backup bin/session-backup; \
+		cp session-manager/target/compatible/session-restore bin/session-restore; \
 	else \
-		echo "Cargo not found. Skipping session-restore binary build."; \
+		echo "Cargo not found. Skipping session-backup/session-restore binaries build."; \
 	fi
 
 man: $(addprefix man/,$(MANPAGES))
