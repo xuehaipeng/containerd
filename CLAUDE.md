@@ -271,5 +271,3 @@ The hook scripts can be used in Kubernetes StatefulSet configurations as shown i
 - Path mappings file (`/etc/path-mappings.json`)
 - Local session directories (`/etc/sessions` mapped from `/shared/nb`)
 - Backup storage directory (`/etc/backup` mapped from `/tecofs/nb-sessions/{namespace}/{pod_name}/{container_name}`)
-
-See `README.session-backup-restore.md` for detailed documentation and usage examples.
