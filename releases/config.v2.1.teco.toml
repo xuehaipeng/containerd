@@ -4,8 +4,8 @@ disabled_plugins = []
 imports = []
 oom_score = 0
 required_plugins = []
-root = "/s/d"
-state = "/s/c"
+root = "/data/c/r"
+state = "/data/c/s"
 temp = ""
 version = 3
 
@@ -51,7 +51,7 @@ version = 3
 
     [plugins."io.containerd.cri.v1.images".registry]
       config_path = "/etc/containerd/certs.d"
-      
+
       [plugins."io.containerd.cri.v1.images".registry.auths]
 
       [plugins."io.containerd.cri.v1.images".registry.headers]
@@ -89,8 +89,8 @@ version = 3
     cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
     drain_exec_sync_io_timeout = "0s"
     ignore_deprecation_warnings = []
-    shared_snapshot_path = "/s"
-    shared_snapshot_namespace_regex = "default"
+    shared_snapshot_path = "/shared/nb"
+    shared_snapshot_namespace_regex = "kubecube-workspace-.*"
     shared_snapshot_pod_name_regex = "^nb-.*"
 
     [plugins."io.containerd.cri.v1.runtime".containerd]
@@ -116,7 +116,7 @@ version = 3
 
           [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
             SystemdCgroup = true
-            BinaryName = ""
+            BinaryName = "/opt/kube/bin/runc"
             CriuImagePath = ""
             CriuWorkPath = ""
             IoGid = 0
