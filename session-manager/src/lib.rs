@@ -8,8 +8,27 @@ use std::process::{Command, Stdio};
 use std::io::{self, Write as IoWrite};
 use std::time::Duration;
 use std::thread;
+use std::sync::Arc;
+use parking_lot::RwLock;
+use lru::LruCache;
+use once_cell::sync::Lazy;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures::future::try_join_all;
+use rayon::prelude::*;
+use blake3::Hasher;
+use memmap2::Mmap;
+use std::num::NonZeroUsize;
 
 pub mod direct_restore;
+mod optimized_io;
+mod resource_manager;
+mod async_operations;
+
+// Global LRU cache for path mappings
+static PATH_MAPPING_CACHE: Lazy<Arc<RwLock<LruCache<String, PathMapping>>>> = 
+    Lazy::new(|| Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(1000).unwrap()))));
+
+
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PathMappings {
@@ -114,6 +133,13 @@ pub fn validate_path_security(path: &Path, allowed_base: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn find_current_session_async(
+    mappings_file: &Path,
+    pod_info: &PodInfo,
+) -> Result<Option<SessionInfo>> {
+    find_current_session_cached(mappings_file, pod_info).await
+}
+
 pub fn find_current_session(
     mappings_file: &Path,
     pod_info: &PodInfo,
@@ -123,7 +149,7 @@ pub fn find_current_session(
         return Ok(None);
     }
 
-    let content = fs::read_to_string(mappings_file)
+    let content = optimized_io::read_file_optimized(mappings_file)
         .with_context(|| format!("Failed to read mappings file: {}", mappings_file.display()))?;
 
     if content.trim().is_empty() {
@@ -404,10 +430,72 @@ pub fn transfer_data(source: &Path, target: &Path, timeout: u64) -> Result<Trans
     validate_path_security(source, &PathBuf::from("/"))?;
     validate_path_security(target, &PathBuf::from("/"))?;
     
-    // Try rsync first if available
-    if which::which("rsync").is_ok() {
-        transfer_data_rsync(source, target, timeout)
-    } else {
-        transfer_data_tar(source, target, timeout)
+    // Use resource manager for optimized operations
+    let resource_manager = resource_manager::ResourceManager::global();
+    
+    resource_manager.thread_pool.execute_io(|| {
+        // Try optimized rsync first if available
+        if which::which("rsync").is_ok() {
+            transfer_data_rsync(source, target, timeout)
+        } else {
+            transfer_data_tar(source, target, timeout)
+        }
+    })
+}
+
+/// Cached version of find_current_session with async support
+async fn find_current_session_cached(
+    mappings_file: &Path,
+    pod_info: &PodInfo,
+) -> Result<Option<SessionInfo>> {
+    crate::async_operations::find_current_session_cached(mappings_file, pod_info).await
+}
+
+/// Transfer data with optimized parallel operations
+pub async fn transfer_data_parallel(source: &Path, target: &Path, timeout: u64) -> Result<TransferResult> {
+    // Validate paths for security
+    validate_path_security(source, &PathBuf::from("/"))?;
+    validate_path_security(target, &PathBuf::from("/"))?;
+    
+    let mut result = TransferResult {
+        success_count: 0,
+        error_count: 0,
+        skipped_count: 0,
+        errors: Vec::new(),
+    };
+    
+    info!("Using optimized parallel transfer from {} to {}", source.display(), target.display());
+    
+    // Use async file operations with timeout
+    let transfer_future = optimized_io::copy_file_async(source, target);
+    let timeout_duration = std::time::Duration::from_secs(timeout);
+    
+    match tokio::time::timeout(timeout_duration, transfer_future).await {
+        Ok(Ok(bytes_copied)) => {
+            info!("Parallel transfer completed successfully: {} bytes", bytes_copied);
+            result.success_count = 1;
+        }
+        Ok(Err(e)) => {
+            warn!("Parallel transfer failed: {}", e);
+            result.errors.push(format!("Transfer error: {}", e));
+            result.error_count = 1;
+        }
+        Err(_) => {
+            result.errors.push("Operation timed out".to_string());
+            result.error_count = 1;
+        }
     }
+    
+    Ok(result)
+}
+
+/// Optimized file integrity verification using Blake3 hashing
+pub fn verify_file_integrity(file1: &Path, file2: &Path) -> Result<bool> {
+    let resource_manager = resource_manager::ResourceManager::global();
+    
+    resource_manager.thread_pool.execute_compute(|| {
+        let hash1 = optimized_io::hash_file_parallel(file1)?;
+        let hash2 = optimized_io::hash_file_parallel(file2)?;
+        Ok(hash1 == hash2)
+    })
 }
