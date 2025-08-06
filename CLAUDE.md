@@ -220,54 +220,199 @@ labels = [
 
 ### Architecture Overview
 
-The session management functionality has been refactored to address limitations with OverlayFS on shared storage systems. The new architecture works as follows:
+The session management functionality has been completely rewritten in **Rust** to provide a robust, production-ready solution for session backup and restore in containerd environments. The new architecture addresses all previous issues with shell scripts and introduces advanced features:
 
 1. **Local Session Storage**: Container session data (upperdir) is stored on local filesystems with XFS project quotas for ephemeral storage limiting (handled by the image-server project)
 
 2. **Path Mappings**: JSON file that maps container identifiers (namespace/pod_name/container_name) to session directories using hash-based paths ({pod_hash}/{snapshot_hash})
 
-3. **Backup Storage**: Shared storage with simple directory structure ({namespace}/{pod_name}/{container_name}) used only for backup/restore operations
+3. **Backup Storage**: Shared storage with simple directory structure ({namespace}/{pod_name}/{container_name}) used for backup/restore operations
 
 4. **Kubernetes Lifecycle Hooks**: 
-   - **postStart Hook**: Restores session data from shared backup storage to local storage
+   - **postStart Hook**: Restores session data using **direct container root restoration**
    - **preStop Hook**: Backs up session data from local storage to shared backup storage
 
 ### Implementation
 
-The refactoring has been completed with the following components:
+The implementation has been completely rewritten in **Rust** with the following components:
 
-1. **Enhanced Shell Scripts**: 
-   - `session-backup.sh`: Backup script for postStart hook with JSON parsing and robust file handling
-   - `session-restore.sh`: Restore script for preStop hook with JSON parsing and robust file handling
+#### 1. **Rust Binaries** (`session-manager/`)
 
-2. **Kubernetes Configuration**: Updated StatefulSet specifications with proper volume mounts for path mappings, local sessions, and backup storage
+**Project Structure**:
+```
+session-manager/
+├── src/
+│   ├── lib.rs                    # Core library with common functions
+│   ├── direct_restore.rs         # DirectRestoreEngine library module
+│   ├── session-backup.rs         # Session backup binary
+│   └── session-restore.rs        # Session restore binary (direct approach)
+├── Cargo.toml                    # Dependencies and binary configuration
+└── build-compatible.sh           # Build script for musl static binaries
+```
 
-3. **JSON Parsing**: Scripts use `jq` to parse path mappings and identify the correct session directory based on namespace/pod_name/container_name
+**Key Dependencies**:
+- **Core**: `anyhow`, `clap`, `log`, `env_logger`, `serde`, `chrono`
+- **Async/Performance**: `tokio`, `rayon`, `futures`, `async-stream`
+- **Optimization**: `blake3`, `lru`, `memmap2`, `parking_lot`, `once_cell`
+- **File Operations**: `walkdir`, `which`, `filetime`, `tempfile`
 
-4. **Robust File Handling**: Scripts handle all file types including hidden files, large files, and empty directories using rsync with appropriate options
+#### 2. **Session Backup Binary** (`session-backup.rs`)
 
-### Key Features
+**Features**:
+- **Optimized Async Operations**: Uses Tokio runtime for async file operations
+- **Mount Bypass**: Automatically detects and excludes mounted paths during backup
+- **Multiple Transfer Methods**: rsync (primary) with tar fallback
+- **Comprehensive Error Handling**: Graceful handling of busy/read-only files
+- **Performance Optimizations**: Parallel processing and resource management
 
-1. **Precise Session Identification**: Scripts parse JSON path mappings to find the current session by identifying the newest entry (by created_at timestamp) for the specific container
+**Key Capabilities**:
+```rust
+// Enhanced backup with mount bypass
+transfer_data_with_mount_bypass(&source, &target, timeout, bypass_mounts)
 
-2. **Complete File Handling**: 
-   - Uses rsync with options to handle all file types
-   - Fallback to tar if rsync is not available
-   - Proper handling of read-only files (warnings but no failures)
-   - Support for hidden files, large files, and empty directories
+// Async session discovery
+find_current_session_async(&mappings_file, &pod_info).await
+```
 
-3. **Error Handling**: 
-   - Comprehensive logging
-   - Timeout support
-   - Graceful handling of partial failures
-   - Dry-run mode for testing
+#### 3. **Session Restore Binary** (`session-restore.rs`)
 
-4. **Flexible Configuration**: All paths and parameters are configurable via command-line arguments
+**Revolutionary Direct Container Root Restoration**:
+- **Direct Restoration**: Files are restored directly to container filesystem paths (`/root`, `/home`, etc.)
+- **No OverlayFS Dependencies**: Eliminates timing issues with OverlayFS mounting
+- **Automatic Cleanup**: Successfully restored files are automatically cleaned from backup storage
+- **Robust Error Handling**: Gracefully skips busy/read-only files with detailed logging
 
-### Usage
+**Key Features**:
+```rust
+pub struct DirectRestoreEngine {
+    pub dry_run: bool,
+    pub timeout: u64,
+    pub max_retries: u32,
+    pub retry_delay: Duration,
+}
 
-The hook scripts can be used in Kubernetes StatefulSet configurations as shown in `test/test-session-backup-restore.yaml`. The scripts require the following volume mounts:
+// Direct container root restoration
+restore_engine.restore_to_container_root(&backup_path)
+```
 
-- Path mappings file (`/etc/path-mappings.json`)
-- Local session directories (`/etc/sessions` mapped from `/shared/nb`)
-- Backup storage directory (`/etc/backup` mapped from `/tecofs/nb-sessions/{namespace}/{pod_name}/{container_name}`)
+#### 4. **Core Library** (`lib.rs`)
+
+**Advanced Features**:
+- **LRU Caching**: Global LRU cache for path mappings with 1000-entry capacity
+- **Resource Management**: Thread pools for I/O and compute operations
+- **Optimized File Operations**: Memory-mapped files, Blake3 hashing, parallel processing
+- **Mount Detection**: Automatic detection and handling of mounted filesystems
+- **Security Validation**: Path traversal protection and security checks
+
+**Performance Optimizations**:
+```rust
+// Global LRU cache for path mappings
+static PATH_MAPPING_CACHE: Lazy<Arc<RwLock<LruCache<String, PathMapping>>>>
+
+// Parallel file operations
+transfer_data_parallel(source, target, timeout).await
+
+// Optimized file integrity verification
+verify_file_integrity(file1, file2)
+```
+
+#### 5. **DirectRestoreEngine** (`direct_restore.rs`)
+
+**Advanced Restoration Features**:
+- **Parallel Processing**: Uses Rayon for parallel file processing
+- **Comprehensive Validation**: Pre-cleanup validation with rollback capability
+- **Batch Operations**: Batch cleanup with automatic rollback on failure
+- **Safety Checks**: Disk space validation, content verification, system file detection
+- **Retry Logic**: Configurable retry mechanisms for transient errors
+
+**Error Classification**:
+```rust
+pub enum CopyResult {
+    Success,
+    Skipped(String),    // File busy, read-only, permission denied
+    Failed(String),     // Unrecoverable errors
+}
+```
+
+### Building and Deployment
+
+#### **Build Commands**:
+```bash
+# Standard build
+cd session-manager
+cargo build --release
+
+# Static musl build (recommended for containers)
+./build-compatible.sh
+
+# Binaries created at:
+# - target/release/session-backup
+# - target/release/session-restore
+# - target/compatible/session-backup (static)
+# - target/compatible/session-restore (static)
+```
+
+#### **Container Integration**:
+```dockerfile
+# Copy static binaries (no GLIBC dependencies)
+COPY session-manager/target/compatible/session-backup /usr/local/bin/
+COPY session-manager/target/compatible/session-restore /usr/local/bin/
+RUN chmod +x /usr/local/bin/session-backup /usr/local/bin/session-restore
+```
+
+### Usage Examples
+
+#### **Session Backup** (preStop hook):
+```bash
+./session-backup \
+  --mappings-file /etc/path-mappings.json \
+  --sessions-path /etc/sessions \
+  --backup-path /etc/backup \
+  --namespace default \
+  --pod-name nb-test-0 \
+  --container-name inference \
+  --timeout 900 \
+  --bypass-mounts true
+```
+
+#### **Session Restore** (postStart hook):
+```bash
+./session-restore \
+  --backup-path /etc/backup \
+  --timeout 900 \
+  --dry-run false
+```
+
+### Configuration
+
+The Rust implementation supports extensive configuration:
+
+- **Command-line arguments**: Full CLI with help and validation
+- **Environment variables**: Automatic fallback for container environments
+- **Timeout configuration**: Configurable timeouts for all operations
+- **Logging levels**: Debug, info, warn, error with file-based logging
+- **Dry-run mode**: Safe testing without actual file operations
+
+### Monitoring and Observability
+
+- **Detailed Metrics**: File counts, success rates, error details, operation duration
+- **Comprehensive Logging**: All operations logged to `/tmp/session-{backup|restore}-{timestamp}.log`
+- **Error Classification**: Detailed categorization of skipped vs failed operations
+- **Performance Tracking**: Operation timing and resource usage
+
+### Volume Mounts Required
+
+The Rust binaries require the following volume mounts in Kubernetes:
+
+- **Path mappings**: `/etc/path-mappings.json` (read-only)
+- **Local sessions**: `/etc/sessions` mapped from `/shared/nb`
+- **Backup storage**: `/etc/backup` mapped from `/tecofs/nb-sessions/{namespace}/{pod_name}/{container_name}`
+
+### Testing and Validation
+
+The implementation includes comprehensive testing:
+
+- **Unit tests**: Individual function testing with `cargo test`
+- **Integration tests**: End-to-end workflow testing
+- **Performance benchmarks**: Operation timing and resource usage
+- **Error simulation**: Testing with busy files, read-only filesystems, permission issues
