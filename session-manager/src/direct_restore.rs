@@ -591,13 +591,16 @@ impl DirectRestoreEngine {
                 dir_paths.push(entry_path);
             } else if metadata.is_file() {
                 file_paths.push(entry_path);
+            } else if metadata.file_type().is_symlink() {
+                // Include symlinks for processing
+                file_paths.push(entry_path);
             } else {
-                // Handle symlinks and other file types
-                debug!("Skipping non-regular file: {}", entry_path.display());
+                // Handle other special file types
+                debug!("Skipping special file type: {}", entry_path.display());
                 result.skipped_files += 1;
                 result.skipped_details.push(SkippedFile {
                     path: entry_path.clone(),
-                    reason: "Not a regular file".to_string(),
+                    reason: "Special file type (not regular file or symlink)".to_string(),
                 });
             }
         }
@@ -660,51 +663,68 @@ impl DirectRestoreEngine {
 
         debug!("Processing file: {} -> {}", backup_file_path.display(), target_path.display());
 
-        // Copy file with retry logic for transient errors
-        let copy_result = self.copy_file_with_retry(backup_file_path, &target_path);
+        // Try move first (most efficient), then fallback to copy
+        let move_result = self.move_file_with_retry(backup_file_path, &target_path);
         
-        match copy_result {
+        match move_result {
             CopyResult::Success => {
-                info!("Successfully restored: {}", target_path.display());
+                info!("Successfully moved: {}", target_path.display());
                 
-                // Validate that the restored file is accessible
+                // Validate that the moved file is accessible
                 if let Err(e) = self.validate_restored_file(&target_path) {
-                    warn!("Restored file validation failed for {}: {}", target_path.display(), e);
-                    // Don't fail the operation, just log the warning
+                    warn!("Moved file validation failed for {}: {}", target_path.display(), e);
                 }
                 
-                // Clean up successfully restored file from backup directory
-                if !self.dry_run {
-                    match self.validate_file_before_cleanup(backup_file_path, &target_path) {
-                        Ok(()) => {
-                            match self.cleanup_backup_file(backup_file_path) {
-                                Ok(()) => {
-                                    info!("Cleaned backup file after successful restore: {}", backup_file_path.display());
-                                    Ok(FileProcessOutcome::Cleaned)
-                                }
-                                Err(e) => {
-                                    warn!("Cleanup operation failed for {}: {}", backup_file_path.display(), e);
-                                    Ok(FileProcessOutcome::Success)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("File validation failed before cleanup for {}: {}", backup_file_path.display(), e);
-                            Ok(FileProcessOutcome::Success)
-                        }
-                    }
-                } else {
-                    info!("DRY RUN: Would validate and clean backup file: {}", backup_file_path.display());
-                    Ok(FileProcessOutcome::Success)
-                }
+                // File is automatically cleaned by move operation
+                Ok(FileProcessOutcome::Cleaned)
             }
             CopyResult::Skipped(reason) => {
-                info!("Skipped file: {} - {}", target_path.display(), reason);
+                info!("Skipped file move: {} - {}", target_path.display(), reason);
                 Ok(FileProcessOutcome::Skipped(reason))
             }
             CopyResult::Failed(error) => {
-                error!("Failed to restore file: {} - {}", target_path.display(), error);
-                Ok(FileProcessOutcome::Failed(error))
+                debug!("Move failed, falling back to copy: {} - {}", target_path.display(), error);
+                
+                // Fall back to copy+delete
+                let copy_result = self.copy_file_with_retry(backup_file_path, &target_path);
+                match copy_result {
+                    CopyResult::Success => {
+                        info!("Successfully copied (fallback): {}", target_path.display());
+                        
+                        if let Err(e) = self.validate_restored_file(&target_path) {
+                            warn!("Copied file validation failed for {}: {}", target_path.display(), e);
+                        }
+                        
+                        // Clean up backup file after successful copy
+                        if !self.dry_run {
+                            match self.validate_file_before_cleanup(backup_file_path, &target_path) {
+                                Ok(()) => {
+                                    match self.cleanup_backup_file(backup_file_path) {
+                                        Ok(()) => Ok(FileProcessOutcome::Cleaned),
+                                        Err(e) => {
+                                            warn!("Cleanup failed for {}: {}", backup_file_path.display(), e);
+                                            Ok(FileProcessOutcome::Success)
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("File validation failed before cleanup for {}: {}", backup_file_path.display(), e);
+                                    Ok(FileProcessOutcome::Success)
+                                }
+                            }
+                        } else {
+                            Ok(FileProcessOutcome::Success)
+                        }
+                    }
+                    CopyResult::Skipped(reason) => {
+                        info!("Skipped file copy: {} - {}", target_path.display(), reason);
+                        Ok(FileProcessOutcome::Skipped(reason))
+                    }
+                    CopyResult::Failed(error) => {
+                        error!("Failed to restore file: {} - {}", target_path.display(), error);
+                        Ok(FileProcessOutcome::Failed(error))
+                    }
+                }
             }
         }
     }
@@ -753,6 +773,96 @@ impl DirectRestoreEngine {
         Ok(())
     }
 
+    /// Move file with retry mechanism for transient errors (most efficient)
+    pub fn move_file_with_retry(&self, src: &Path, dst: &Path) -> CopyResult {
+        for attempt in 0..=self.max_retries {
+            let result = self.move_file_with_fallback(src, dst);
+            
+            match &result {
+                CopyResult::Skipped(reason) if self.is_transient_error(reason) => {
+                    if attempt < self.max_retries {
+                        debug!("Transient error on move attempt {} for {}: {}. Retrying in {:?}...", 
+                               attempt + 1, dst.display(), reason, self.retry_delay);
+                        thread::sleep(self.retry_delay);
+                        continue;
+                    } else {
+                        warn!("Max move retries ({}) exceeded for {}: {}", 
+                              self.max_retries, dst.display(), reason);
+                        return result;
+                    }
+                }
+                _ => return result,
+            }
+        }
+        
+        CopyResult::Failed("Unexpected retry loop exit".to_string())
+    }
+
+    /// Move file with graceful error handling (atomic operation)
+    pub fn move_file_with_fallback(&self, src: &Path, dst: &Path) -> CopyResult {
+        if self.dry_run {
+            info!("DRY RUN: Would move {} -> {}", src.display(), dst.display());
+            return CopyResult::Success;
+        }
+
+        // Create parent directories if needed
+        if let Some(parent) = dst.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                return CopyResult::Failed(format!("Failed to create parent directories: {}", e));
+            }
+        }
+
+        // Check if source is a symlink and handle accordingly
+        match fs::symlink_metadata(src) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    // Handle symlinks specially - copy symlink, then remove original
+                    match self.copy_symlink(src, dst) {
+                        Ok(()) => {
+                            // Remove original symlink after successful copy
+                            match fs::remove_file(src) {
+                                Ok(()) => {
+                                    debug!("Successfully moved symlink: {} -> {}", src.display(), dst.display());
+                                    CopyResult::Success
+                                }
+                                Err(e) => {
+                                    warn!("Failed to remove source symlink after copy: {}", e);
+                                    // Symlink was copied successfully, consider it a success
+                                    CopyResult::Success
+                                }
+                            }
+                        }
+                        Err(e) => CopyResult::Failed(format!("Failed to move symlink: {}", e)),
+                    }
+                } else {
+                    // Regular file - try atomic move
+                    match fs::rename(src, dst) {
+                        Ok(()) => {
+                            debug!("Atomic move successful: {} -> {}", src.display(), dst.display());
+                            CopyResult::Success
+                        }
+                        Err(e) => {
+                            // Classify the error
+                            if self.is_file_busy(&e) {
+                                CopyResult::Skipped(format!("File busy: {}", e))
+                            } else if self.is_file_readonly(&e) {
+                                CopyResult::Skipped(format!("Read-only filesystem: {}", e))
+                            } else if self.is_permission_denied(&e) {
+                                CopyResult::Skipped(format!("Permission denied: {}", e))
+                            } else if e.kind() == std::io::ErrorKind::CrossesDevices {
+                                // Cross-device move - will need copy+delete fallback
+                                CopyResult::Failed(format!("Cross-device move (fallback needed): {}", e))
+                            } else {
+                                CopyResult::Failed(format!("Move failed: {}", e))
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => CopyResult::Failed(format!("Failed to get file metadata: {}", e)),
+        }
+    }
+
     /// Copy file with retry mechanism for transient errors
     pub fn copy_file_with_retry(&self, src: &Path, dst: &Path) -> CopyResult {
         for attempt in 0..=self.max_retries {
@@ -784,7 +894,7 @@ impl DirectRestoreEngine {
         reason.contains("File busy") || reason.contains("Resource busy")
     }
 
-    /// Copy file with graceful error handling
+    /// Copy file with graceful error handling including symlinks
     pub fn copy_file_with_fallback(&self, src: &Path, dst: &Path) -> CopyResult {
         if self.dry_run {
             info!("DRY RUN: Would copy {} -> {}", src.display(), dst.display());
@@ -798,27 +908,52 @@ impl DirectRestoreEngine {
             }
         }
 
-        // Attempt to copy the file
-        match fs::copy(src, dst) {
-            Ok(_) => {
-                // Try to preserve permissions and timestamps
-                if let Err(e) = self.preserve_file_attributes(src, dst) {
-                    warn!("Failed to preserve file attributes for {}: {}", dst.display(), e);
-                    // Don't fail the copy operation for attribute preservation failures
+        // Check if source is a symlink and handle specially
+        match fs::symlink_metadata(src) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    // Handle symlinks
+                    match self.copy_symlink(src, dst) {
+                        Ok(()) => {
+                            debug!("Successfully copied symlink: {} -> {}", src.display(), dst.display());
+                            CopyResult::Success
+                        }
+                        Err(e) => {
+                            if self.is_permission_denied(&e.downcast_ref::<std::io::Error>().unwrap_or(&std::io::Error::new(std::io::ErrorKind::Other, ""))) {
+                                CopyResult::Skipped(format!("Permission denied for symlink: {}", e))
+                            } else {
+                                CopyResult::Failed(format!("Failed to copy symlink: {}", e))
+                            }
+                        }
+                    }
+                } else {
+                    // Regular file - attempt to copy
+                    match fs::copy(src, dst) {
+                        Ok(_) => {
+                            // Try to preserve permissions and timestamps
+                            if let Err(e) = self.preserve_file_attributes(src, dst) {
+                                warn!("Failed to preserve file attributes for {}: {}", dst.display(), e);
+                                // Don't fail the copy operation for attribute preservation failures
+                            }
+                            CopyResult::Success
+                        }
+                        Err(e) => {
+                            // Classify the error and decide whether to skip or fail
+                            if self.is_file_busy(&e) {
+                                CopyResult::Skipped(format!("File busy: {}", e))
+                            } else if self.is_file_readonly(&e) {
+                                CopyResult::Skipped(format!("Read-only filesystem: {}", e))
+                            } else if self.is_permission_denied(&e) {
+                                CopyResult::Skipped(format!("Permission denied: {}", e))
+                            } else {
+                                CopyResult::Failed(format!("Copy failed: {}", e))
+                            }
+                        }
+                    }
                 }
-                CopyResult::Success
             }
             Err(e) => {
-                // Classify the error and decide whether to skip or fail
-                if self.is_file_busy(&e) {
-                    CopyResult::Skipped(format!("File busy: {}", e))
-                } else if self.is_file_readonly(&e) {
-                    CopyResult::Skipped(format!("Read-only filesystem: {}", e))
-                } else if self.is_permission_denied(&e) {
-                    CopyResult::Skipped(format!("Permission denied: {}", e))
-                } else {
-                    CopyResult::Failed(format!("Copy failed: {}", e))
-                }
+                CopyResult::Failed(format!("Failed to get file metadata: {}", e))
             }
         }
     }
@@ -1033,6 +1168,40 @@ impl DirectRestoreEngine {
                 bail!("Target file is not readable: {} - {}", target_path.display(), e);
             }
         }
+    }
+
+    /// Copy symlink preserving its target
+    fn copy_symlink(&self, src: &Path, dst: &Path) -> Result<()> {
+        let link_target = fs::read_link(src)
+            .with_context(|| format!("Failed to read symlink: {}", src.display()))?;
+        
+        // Remove target if it exists
+        if dst.exists() {
+            fs::remove_file(dst)
+                .with_context(|| format!("Failed to remove existing target: {}", dst.display()))?;
+        }
+        
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&link_target, dst)
+                .with_context(|| format!("Failed to create symlink from {} to {}", link_target.display(), dst.display()))?;
+        }
+        
+        #[cfg(windows)]
+        {
+            if link_target.is_dir() {
+                std::os::windows::fs::symlink_dir(&link_target, dst)
+                    .with_context(|| format!("Failed to create directory symlink from {} to {}", link_target.display(), dst.display()))?;
+            } else {
+                std::os::windows::fs::symlink_file(&link_target, dst)
+                    .with_context(|| format!("Failed to create file symlink from {} to {}", link_target.display(), dst.display()))?;
+            }
+        }
+        
+        debug!("Copied symlink: {} -> {} (target: {})", 
+               src.display(), dst.display(), link_target.display());
+        
+        Ok(())
     }
 
     /// Recursively remove empty directories up the tree
