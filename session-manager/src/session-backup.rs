@@ -276,82 +276,199 @@ fn perform_backup_operation(
 
 /// Force terminate container after successful backup completion
 /// This helps pods exit immediately instead of waiting for the full terminationGracePeriodSeconds
+/// Kills all running processes to ensure complete container shutdown
 fn force_terminate_container(grace_seconds: u64, dry_run: bool) -> Result<()> {
     info!("=== Post-Backup Container Termination Started ===");
     info!("Grace period: {} seconds", grace_seconds);
     info!("Dry run mode: {}", dry_run);
 
     if dry_run {
-        info!("DRY RUN: Would send SIGTERM to PID 1, wait {} seconds, then SIGKILL if needed", grace_seconds);
+        info!("DRY RUN: Would list all processes, send SIGTERM to all, wait {} seconds, then SIGKILL if needed", grace_seconds);
         return Ok(());
     }
 
-    // Step 1: Send SIGTERM to PID 1 (main container process)
-    info!("Sending SIGTERM to PID 1 (main container process)");
+    // Step 1: List all running processes (excluding kernel threads and this process)
+    let running_processes = list_all_running_processes()?;
+    info!("Found {} running processes to terminate", running_processes.len());
     
-    match Command::new("kill")
-        .arg("-TERM")
-        .arg("1")
-        .output() 
-    {
-        Ok(output) => {
-            if output.status.success() {
-                info!("SIGTERM sent successfully to PID 1");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to send SIGTERM to PID 1: {}", stderr);
-            }
-        }
-        Err(e) => {
-            error!("Failed to execute kill command for SIGTERM: {}", e);
-            // Continue with the process - we'll try SIGKILL anyway
-        }
+    if running_processes.is_empty() {
+        info!("No user processes found, container termination not needed");
+        return Ok(());
     }
 
-    // Step 2: Wait for graceful termination
-    info!("Waiting {} seconds for graceful termination...", grace_seconds);
-    thread::sleep(Duration::from_secs(grace_seconds));
-
-    // Step 3: Check if process still exists, if so send SIGKILL
-    info!("Checking if PID 1 still exists...");
+    // Step 2: Send SIGTERM to all processes (excluding kernel threads)
+    info!("Sending SIGTERM to all {} running processes...", running_processes.len());
+    let mut term_success_count = 0;
     
-    let still_running = match Command::new("kill")
-        .arg("-0")  // Check if process exists without sending signal
-        .arg("1")
-        .output() 
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false, // Assume process is gone if we can't check
-    };
-
-    if still_running {
-        warn!("PID 1 still running after {} seconds, sending SIGKILL", grace_seconds);
+    for process in &running_processes {
+        debug!("Sending SIGTERM to PID {} ({})", process.pid, process.name);
         
         match Command::new("kill")
-            .arg("-KILL")
-            .arg("1")
+            .arg("-TERM")
+            .arg(&process.pid.to_string())
             .output() 
         {
             Ok(output) => {
                 if output.status.success() {
-                    info!("SIGKILL sent successfully to PID 1");
+                    term_success_count += 1;
+                    debug!("SIGTERM sent successfully to PID {}", process.pid);
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!("Failed to send SIGKILL to PID 1: {}", stderr);
+                    if !stderr.contains("No such process") {
+                        warn!("Failed to send SIGTERM to PID {}: {}", process.pid, stderr);
+                    }
                 }
             }
             Err(e) => {
-                error!("Failed to execute kill command for SIGKILL: {}", e);
+                warn!("Failed to execute kill command for PID {}: {}", process.pid, e);
+            }
+        }
+    }
+    
+    info!("SIGTERM sent to {}/{} processes", term_success_count, running_processes.len());
+
+    // Step 3: Wait for graceful termination
+    info!("Waiting {} seconds for graceful termination of all processes...", grace_seconds);
+    thread::sleep(Duration::from_secs(grace_seconds));
+
+    // Step 4: Check which processes are still running and send SIGKILL if needed
+    info!("Checking for remaining processes after grace period...");
+    let remaining_processes = list_all_running_processes()?;
+    
+    if remaining_processes.is_empty() {
+        info!("All processes terminated gracefully, no SIGKILL needed");
+    } else {
+        warn!("Found {} processes still running after grace period, sending SIGKILL", remaining_processes.len());
+        
+        let mut kill_success_count = 0;
+        for process in &remaining_processes {
+            debug!("Sending SIGKILL to PID {} ({})", process.pid, process.name);
+            
+            match Command::new("kill")
+                .arg("-KILL")
+                .arg(&process.pid.to_string())
+                .output() 
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        kill_success_count += 1;
+                        debug!("SIGKILL sent successfully to PID {}", process.pid);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.contains("No such process") {
+                            error!("Failed to send SIGKILL to PID {}: {}", process.pid, stderr);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to execute kill command for PID {}: {}", process.pid, e);
+                }
             }
         }
         
+        info!("SIGKILL sent to {}/{} remaining processes", kill_success_count, remaining_processes.len());
+        
         // Give a moment for SIGKILL to take effect
-        thread::sleep(Duration::from_secs(1));
-        info!("Container termination process completed");
-    } else {
-        info!("PID 1 terminated gracefully, no SIGKILL needed");
+        thread::sleep(Duration::from_secs(2));
+        
+        // Final check
+        let final_processes = list_all_running_processes()?;
+        if final_processes.is_empty() {
+            info!("All processes successfully terminated");
+        } else {
+            warn!("Warning: {} processes may still be running after SIGKILL", final_processes.len());
+            for process in &final_processes {
+                warn!("  Still running: PID {} ({})", process.pid, process.name);
+            }
+        }
     }
 
     info!("=== Post-Backup Container Termination Completed ===");
     Ok(())
+}
+
+#[derive(Debug)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    ppid: u32,
+}
+
+/// List all running user processes (excluding kernel threads, init, and this process)
+fn list_all_running_processes() -> Result<Vec<ProcessInfo>> {
+    // Use different ps command based on OS
+    let output = if cfg!(target_os = "macos") {
+        Command::new("ps")
+            .arg("-eo")
+            .arg("pid,ppid,comm,stat")
+            .output()
+            .with_context(|| "Failed to execute ps command")?
+    } else {
+        // Linux version
+        Command::new("ps")
+            .arg("-eo")
+            .arg("pid,ppid,comm,stat")
+            .arg("--no-headers")
+            .output()
+            .with_context(|| "Failed to execute ps command")?
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("ps command failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes = Vec::new();
+    let current_pid = std::process::id();
+    let mut skip_header = true;
+    
+    for line in stdout.lines() {
+        // Skip header line on macOS (first line)
+        if skip_header && cfg!(target_os = "macos") {
+            skip_header = false;
+            continue;
+        }
+        
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.len() >= 4 {
+            if let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                let name = parts[2].to_string();
+                let stat = parts[3];
+                
+                // Skip this process
+                if pid == current_pid {
+                    continue;
+                }
+                
+                // Skip kernel threads (processes with names in [brackets])
+                if name.starts_with('[') && name.ends_with(']') {
+                    continue;
+                }
+                
+                // Skip zombie processes (stat contains 'Z')
+                if stat.contains('Z') {
+                    continue;
+                }
+                
+                // Include all other processes (including PID 1)
+                processes.push(ProcessInfo {
+                    pid,
+                    name,
+                    ppid,
+                });
+            }
+        }
+    }
+    
+    // Sort processes by PID for consistent ordering
+    // In a container environment, this ensures child processes are typically terminated before parents
+    processes.sort_by_key(|p| p.pid);
+    
+    debug!("Process termination order:");
+    for (i, process) in processes.iter().enumerate() {
+        debug!("  {}: PID {} ({}) - PPID {}", i + 1, process.pid, process.name, process.ppid);
+    }
+    
+    Ok(processes)
 }
