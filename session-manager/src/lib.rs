@@ -18,6 +18,7 @@ use std::collections::HashSet;
 
 pub mod direct_restore;
 pub mod direct_restore_enhanced;
+pub mod lockless_backup;
 mod optimized_io;
 mod resource_manager;
 mod async_operations;
@@ -237,53 +238,8 @@ pub fn show_directory_contents(path: &Path) -> Result<()> {
 }
 
 pub fn create_directory_with_lock(path: &Path) -> Result<()> {
-    let lock_file = path.with_extension("lock");
-    
-    // Try to acquire lock
-    let _lock = acquire_file_lock(&lock_file)
-        .with_context(|| format!("Failed to acquire lock for directory creation: {}", path.display()))?;
-    
-    if !path.exists() {
-        fs::create_dir_all(path)
-            .with_context(|| format!("Failed to create directory: {}", path.display()))?;
-        info!("Created directory: {}", path.display());
-    } else {
-        debug!("Directory already exists: {}", path.display());
-    }
-    
-    Ok(())
-}
-
-fn acquire_file_lock(lock_file: &Path) -> Result<File> {
-    let mut attempts = 0;
-    const MAX_ATTEMPTS: u32 = 30;
-    const RETRY_DELAY: Duration = Duration::from_millis(100);
-    
-    loop {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_file)
-        {
-            Ok(mut file) => {
-                // Write process info to lock file
-                writeln!(file, "pid={}", std::process::id())?;
-                writeln!(file, "timestamp={}", chrono::Utc::now().to_rfc3339())?;
-                return Ok(file);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                attempts += 1;
-                if attempts >= MAX_ATTEMPTS {
-                    bail!("Failed to acquire lock after {} attempts: {}", MAX_ATTEMPTS, lock_file.display());
-                }
-                warn!("Lock file exists, waiting... (attempt {}/{})", attempts, MAX_ATTEMPTS);
-                thread::sleep(RETRY_DELAY);
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to create lock file: {}", lock_file.display()));
-            }
-        }
-    }
+    // Use lockless mechanism since session backup is single-process per pod
+    crate::lockless_backup::create_directory_simple(path)
 }
 
 pub fn transfer_data_rsync(source: &Path, target: &Path, timeout: u64) -> Result<TransferResult> {

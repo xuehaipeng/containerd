@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{info, warn, debug};
 use session_manager::*;
+use session_manager::lockless_backup::{execute_backup_with_safety_check, create_directory_simple};
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "session-backup",
-    about = "Containerd session backup tool for shared storage"
+    about = "Lockless containerd session backup tool optimized for single-process operations"
 )]
 struct Args {
     #[arg(
@@ -83,7 +84,7 @@ fn main() -> Result<()> {
     init_file_logging("session-backup")?;
     let args = Args::parse();
 
-    info!("=== Optimized Session Backup Tool Started ===");
+    info!("=== Session Backup Tool Started (Lockless) ===");
     info!("Mappings file: {}", args.mappings_file.display());
     info!("Sessions path: {}", args.sessions_path.display());
     info!("Backup path: {}", args.backup_path.display());
@@ -108,11 +109,14 @@ fn main() -> Result<()> {
             pod_info.namespace, pod_info.pod_name, pod_info.container_name
         );
 
-        // Parse path mappings to find current session using optimized async loader
-        let current_session = match session_manager::find_current_session_async(&args.mappings_file, &pod_info).await? {
-            Some(session) => session,
+        // Find current session directory asynchronously
+        let session_info = find_current_session_async(&args.mappings_file, &pod_info).await?;
+
+        let session_info = match session_info {
+            Some(info) => info,
             None => {
-                info!("No current session found in path mappings. Nothing to backup.");
+                warn!("No current session found for namespace={}, pod={}, container={}", 
+                      pod_info.namespace, pod_info.pod_name, pod_info.container_name);
                 info!("=== Session Backup Completed (No Session Found) ===");
                 return Ok(());
             }
@@ -120,19 +124,19 @@ fn main() -> Result<()> {
 
         info!(
             "Current session: pod_hash={}, snapshot_hash={}, created_at={}",
-            current_session.pod_hash, current_session.snapshot_hash, current_session.created_at
+            session_info.pod_hash, session_info.snapshot_hash, session_info.created_at
         );
 
-        // Construct current session directory path
+        // Build current session directory path
         let current_session_dir = args.sessions_path
-            .join(&current_session.pod_hash)
-            .join(&current_session.snapshot_hash)
+            .join(&session_info.pod_hash)
+            .join(&session_info.snapshot_hash)
             .join("fs");
 
         info!("Current session directory: {}", current_session_dir.display());
         info!("Backup storage directory: {}", args.backup_path.display());
 
-        // Validate current session directory exists and has content
+        // Validate that session directory exists and has content
         if !current_session_dir.exists() {
             warn!("Current session directory does not exist: {}", current_session_dir.display());
             info!("=== Session Backup Completed (No Session Directory) ===");
@@ -145,62 +149,92 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
-        // Show current session directory contents before backup
+        // Show directory contents before backup
         debug!("Current session directory contents before backup:");
         show_directory_contents(&current_session_dir)?;
 
-        // Show backup storage directory contents before backup
         debug!("Backup storage directory contents before backup:");
-        if args.backup_path.exists() {
-            show_directory_contents(&args.backup_path)?;
-        } else {
-            debug!("Backup storage directory does not exist yet");
-        }
+        show_directory_contents(&args.backup_path)?;
 
-        // Create backup storage directory if it doesn't exist
-        if !args.dry_run {
-            create_directory_with_lock(&args.backup_path)
-                .with_context(|| format!("Failed to create backup storage directory: {}", args.backup_path.display()))?;
-        } else {
-            info!("DRY RUN: Would create backup storage directory: {}", args.backup_path.display());
-        }
+        // Execute lockless backup operation
+        info!("Starting lockless backup operation...");
+        
+        let backup_operation = format!("session-backup-{}-{}-{}", 
+                                      pod_info.namespace, pod_info.pod_name, pod_info.container_name);
 
-        // Perform optimized backup with mount bypass option
-        info!("Starting optimized backup of session data from {} to {}...", 
-              current_session_dir.display(), args.backup_path.display());
+        let result = execute_backup_with_safety_check(&args.backup_path, &backup_operation, || {
+            perform_backup_operation(&current_session_dir, &args.backup_path, args.timeout, args.bypass_mounts, args.dry_run)
+        });
 
-        if !args.dry_run {
-            // Use optimized transfer with mount bypass capability
-            let result = session_manager::transfer_data_with_mount_bypass(&current_session_dir, &args.backup_path, args.timeout, args.bypass_mounts)
-                .with_context(|| "Failed to backup session data with optimized transfer")?;
-            
-            info!("Optimized backup result: {} files copied, {} errors, {} skipped", 
-                  result.success_count, result.error_count, result.skipped_count);
-            
-            if !result.errors.is_empty() {
-                warn!("Backup completed with some errors:");
-                for error in &result.errors {
-                    warn!("  {}", error);
-                }
+        match result {
+            Ok(()) => {
+                info!("=== Session Backup Completed Successfully ===");
+                
+                // Show final backup directory contents
+                debug!("Backup storage directory contents after backup:");
+                show_directory_contents(&args.backup_path)?;
             }
-            
-            if result.error_count > 0 && result.success_count == 0 {
-                return Err(anyhow::anyhow!("Optimized backup failed: {} errors occurred", result.error_count));
+            Err(e) => {
+                return Err(e).with_context(|| "Session backup operation failed");
             }
-        } else {
-            info!("DRY RUN: Would copy data from {} to {} using optimized operations{}", 
-                  current_session_dir.display(), args.backup_path.display(),
-                  if args.bypass_mounts { " with mount bypass" } else { "" });
         }
 
-        // Show backup storage directory contents after backup
-        debug!("Backup storage directory contents after optimized backup:");
-        if args.backup_path.exists() {
-            show_directory_contents(&args.backup_path)?;
-        }
-
-        info!("=== Optimized Session Backup Completed ===");
         Ok(())
     })
 }
 
+/// Perform the actual backup operation without locking
+fn perform_backup_operation(
+    source_dir: &PathBuf,
+    backup_dir: &PathBuf,
+    timeout: u64,
+    bypass_mounts: bool,
+    dry_run: bool,
+) -> Result<()> {
+    info!("Performing lockless backup: {} -> {}", source_dir.display(), backup_dir.display());
+
+    // Create backup directory (lockless)
+    create_directory_simple(backup_dir)
+        .with_context(|| format!("Failed to create backup directory: {}", backup_dir.display()))?;
+
+    if dry_run {
+        info!("DRY RUN: Would backup {} to {}", source_dir.display(), backup_dir.display());
+        return Ok(());
+    }
+
+    // Perform the actual transfer
+    let transfer_result = if bypass_mounts {
+        info!("Using mount-bypass transfer for lockless backup");
+        transfer_data_with_mount_bypass(source_dir, backup_dir, timeout, true)
+    } else {
+        info!("Using standard transfer for lockless backup");
+        transfer_data(source_dir, backup_dir, timeout)
+    };
+
+    match transfer_result {
+        Ok(result) => {
+            info!("Backup transfer completed:");
+            info!("  Success count: {}", result.success_count);
+            info!("  Error count: {}", result.error_count);
+            info!("  Skipped count: {}", result.skipped_count);
+            
+            if result.error_count > 0 {
+                warn!("Backup completed with {} errors:", result.error_count);
+                for error in &result.errors {
+                    warn!("  - {}", error);
+                }
+            }
+            
+            // Consider backup successful even with some errors (common with busy files)
+            if result.success_count > 0 || result.error_count == 0 {
+                info!("Lockless backup operation succeeded");
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("Backup failed: {} errors, no successful transfers", result.error_count))
+            }
+        }
+        Err(e) => {
+            Err(e).with_context(|| "Backup transfer operation failed")
+        }
+    }
+}
