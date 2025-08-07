@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use log::{info, warn, debug};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Serialize, Deserialize};
 
