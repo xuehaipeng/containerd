@@ -140,7 +140,13 @@ impl DirectRestoreEngine {
             return Ok(result);
         }
 
-        // Use parallel directory processing for better performance
+        // Check if we're in a cross-device scenario and use bulk transfer if so
+        if self.is_cross_device_scenario(backup_path)? {
+            info!("Cross-device scenario detected, using bulk transfer optimization");
+            return self.restore_with_bulk_transfer(backup_path, start_time);
+        }
+
+        // Use parallel directory processing for same-device operations
         self.process_directory_parallel(backup_path, backup_path, &mut result)?;
 
         result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
@@ -180,6 +186,166 @@ impl DirectRestoreEngine {
         }
 
         Ok(result)
+    }
+
+    /// Check if this is a cross-device scenario by testing a sample file move
+    fn is_cross_device_scenario(&self, backup_path: &Path) -> Result<bool> {
+        // Find a sample file to test
+        for entry in fs::read_dir(backup_path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            
+            if entry_path.is_file() {
+                // Try to map to container path and test move
+                if let Ok(container_path) = self.map_backup_to_container_path(&entry_path, backup_path) {
+                    // Create parent directory for test
+                    if let Some(parent) = container_path.parent() {
+                        if let Err(_) = fs::create_dir_all(parent) {
+                            continue; // Skip this file, try another
+                        }
+                    }
+                    
+                    // Test rename (doesn't actually move, just checks if it would work)
+                    if let Err(e) = fs::hard_link(&entry_path, &container_path.with_extension("test_cross_device")) {
+                        if e.kind() == std::io::ErrorKind::CrossesDevices {
+                            debug!("Cross-device scenario detected via test file: {}", entry_path.display());
+                            return Ok(true);
+                        }
+                    } else {
+                        // Clean up test file
+                        let _ = fs::remove_file(&container_path.with_extension("test_cross_device"));
+                        return Ok(false); // Same device
+                    }
+                }
+            }
+        }
+        
+        Ok(false) // Default to same device if we can't test
+    }
+
+    /// Restore using bulk transfer for cross-device scenarios  
+    fn restore_with_bulk_transfer(&self, backup_path: &Path, start_time: SystemTime) -> Result<DirectRestoreResult> {
+        info!("Starting bulk transfer restoration for cross-device scenario");
+        
+        let mut result = DirectRestoreResult {
+            total_files: 0,
+            successful_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            cleaned_files: 0,
+            skipped_details: Vec::new(),
+            failed_details: Vec::new(),
+            cleaned_details: Vec::new(),
+            duration: Duration::from_secs(0),
+        };
+
+        // Count total files first
+        result.total_files = self.count_files_recursive(backup_path)?;
+        info!("Total files to transfer: {}", result.total_files);
+
+        if self.dry_run {
+            info!("DRY RUN: Would perform bulk transfer of {} files", result.total_files);
+            result.successful_files = result.total_files;
+            result.cleaned_files = result.total_files;
+            result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
+            return Ok(result);
+        }
+
+        // Use rsync for efficient bulk transfer
+        match self.bulk_transfer_with_rsync(backup_path) {
+            Ok(transferred_count) => {
+                result.successful_files = transferred_count;
+                result.cleaned_files = transferred_count;
+                info!("Bulk transfer completed successfully: {} files", transferred_count);
+                
+                // Clean up backup directory after successful transfer
+                match fs::remove_dir_all(backup_path) {
+                    Ok(()) => {
+                        info!("Successfully cleaned up backup directory: {}", backup_path.display());
+                    }
+                    Err(e) => {
+                        warn!("Failed to clean up backup directory: {}", e);
+                        // Don't fail the operation for cleanup issues
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Bulk transfer failed: {}", e);
+                result.failed_files = result.total_files;
+                return Err(e);
+            }
+        }
+
+        result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
+        
+        info!("Bulk transfer restoration completed:");
+        info!("  Total files: {}", result.total_files);
+        info!("  Successful: {}", result.successful_files);
+        info!("  Duration: {:?}", result.duration);
+
+        Ok(result)
+    }
+
+    /// Count files recursively for progress reporting
+    fn count_files_recursive(&self, path: &Path) -> Result<usize> {
+        let mut count = 0;
+        
+        if path.is_file() {
+            return Ok(1);
+        }
+        
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let entry_path = entry.path();
+                
+                if entry_path.is_file() {
+                    count += 1;
+                } else if entry_path.is_dir() {
+                    count += self.count_files_recursive(&entry_path)?;
+                }
+            }
+        }
+        
+        Ok(count)
+    }
+
+    /// Perform bulk transfer using rsync for cross-device scenarios
+    fn bulk_transfer_with_rsync(&self, backup_path: &Path) -> Result<usize> {
+        use std::process::Command;
+        
+        info!("Starting rsync bulk transfer from {}", backup_path.display());
+        
+        // Use rsync to transfer all files efficiently
+        let output = Command::new("rsync")
+            .arg("-av")           // Archive mode, verbose
+            .arg("--progress")    // Show progress
+            .arg("--partial")     // Keep partial transfers
+            .arg("--inplace")     // Update files in place
+            .arg(format!("{}/", backup_path.display())) // Source with trailing slash
+            .arg("/")             // Destination (container root)
+            .output()
+            .with_context(|| "Failed to execute rsync command")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        
+        debug!("Rsync stdout: {}", stdout);
+        
+        if output.status.success() {
+            info!("Rsync bulk transfer completed successfully");
+            
+            // Parse rsync output to count transferred files (simplified)
+            let transferred_count = stdout.lines()
+                .filter(|line| !line.is_empty() && !line.starts_with("sending") && !line.starts_with("total"))
+                .count();
+                
+            Ok(transferred_count)
+        } else {
+            let error_msg = format!("Rsync failed with exit code {:?}: {}", output.status.code(), stderr);
+            error!("{}", error_msg);
+            Err(anyhow::anyhow!(error_msg))
+        }
     }
 
     /// Perform final validation of cleanup operations
@@ -629,7 +795,10 @@ impl DirectRestoreEngine {
                             result.failed_files += 1;
                             // Add to failed details would need the path
                         }
-                        FileProcessOutcome::Cleaned => result.cleaned_files += 1,
+                        FileProcessOutcome::Cleaned => {
+                            result.successful_files += 1;
+                            result.cleaned_files += 1;
+                        }
                     }
                 }
                 Err(e) => {
