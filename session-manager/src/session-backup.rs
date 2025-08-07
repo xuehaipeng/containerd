@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use log::{info, warn, debug};
+use log::{info, warn, debug, error};
 use session_manager::*;
 use session_manager::lockless_backup::{execute_backup_with_safety_check, create_directory_simple};
 use std::path::PathBuf;
 use std::fs::OpenOptions;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -50,6 +53,16 @@ struct Args {
 
     #[arg(long, default_value = "true", help = "Whether to bypass mounted paths during backup")]
     bypass_mounts: bool,
+
+    #[arg(long, help = "Force terminate container immediately after successful backup")]
+    force_terminate_after_backup: bool,
+
+    #[arg(
+        long,
+        default_value = "30",
+        help = "Grace period in seconds between SIGTERM and SIGKILL when force terminating (requires --force-terminate-after-backup)"
+    )]
+    termination_grace_seconds: u64,
 }
 
 fn init_file_logging(binary_name: &str) -> Result<()> {
@@ -91,6 +104,10 @@ fn main() -> Result<()> {
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
     info!("Bypass mounts: {}", args.bypass_mounts);
+    info!("Force terminate after backup: {}", args.force_terminate_after_backup);
+    if args.force_terminate_after_backup {
+        info!("Termination grace period: {} seconds", args.termination_grace_seconds);
+    }
 
     // Initialize Tokio runtime for async operations
     let rt = tokio::runtime::Runtime::new()
@@ -173,6 +190,24 @@ fn main() -> Result<()> {
                 // Show final backup directory contents
                 debug!("Backup storage directory contents after backup:");
                 show_directory_contents(&args.backup_path)?;
+
+                // Force terminate container if requested
+                if args.force_terminate_after_backup {
+                    info!("Backup completed successfully - initiating immediate container termination");
+                    
+                    match force_terminate_container(args.termination_grace_seconds, args.dry_run) {
+                        Ok(()) => {
+                            info!("Container termination completed successfully");
+                        }
+                        Err(e) => {
+                            error!("Container termination failed: {}", e);
+                            // Don't fail the backup operation due to termination issues
+                            warn!("Backup succeeded but termination failed - container will terminate normally via Kubernetes");
+                        }
+                    }
+                } else {
+                    info!("Container will terminate normally via Kubernetes (--force-terminate-after-backup not specified)");
+                }
             }
             Err(e) => {
                 return Err(e).with_context(|| "Session backup operation failed");
@@ -237,4 +272,86 @@ fn perform_backup_operation(
             Err(e).with_context(|| "Backup transfer operation failed")
         }
     }
+}
+
+/// Force terminate container after successful backup completion
+/// This helps pods exit immediately instead of waiting for the full terminationGracePeriodSeconds
+fn force_terminate_container(grace_seconds: u64, dry_run: bool) -> Result<()> {
+    info!("=== Post-Backup Container Termination Started ===");
+    info!("Grace period: {} seconds", grace_seconds);
+    info!("Dry run mode: {}", dry_run);
+
+    if dry_run {
+        info!("DRY RUN: Would send SIGTERM to PID 1, wait {} seconds, then SIGKILL if needed", grace_seconds);
+        return Ok(());
+    }
+
+    // Step 1: Send SIGTERM to PID 1 (main container process)
+    info!("Sending SIGTERM to PID 1 (main container process)");
+    
+    match Command::new("kill")
+        .arg("-TERM")
+        .arg("1")
+        .output() 
+    {
+        Ok(output) => {
+            if output.status.success() {
+                info!("SIGTERM sent successfully to PID 1");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to send SIGTERM to PID 1: {}", stderr);
+            }
+        }
+        Err(e) => {
+            error!("Failed to execute kill command for SIGTERM: {}", e);
+            // Continue with the process - we'll try SIGKILL anyway
+        }
+    }
+
+    // Step 2: Wait for graceful termination
+    info!("Waiting {} seconds for graceful termination...", grace_seconds);
+    thread::sleep(Duration::from_secs(grace_seconds));
+
+    // Step 3: Check if process still exists, if so send SIGKILL
+    info!("Checking if PID 1 still exists...");
+    
+    let still_running = match Command::new("kill")
+        .arg("-0")  // Check if process exists without sending signal
+        .arg("1")
+        .output() 
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false, // Assume process is gone if we can't check
+    };
+
+    if still_running {
+        warn!("PID 1 still running after {} seconds, sending SIGKILL", grace_seconds);
+        
+        match Command::new("kill")
+            .arg("-KILL")
+            .arg("1")
+            .output() 
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    info!("SIGKILL sent successfully to PID 1");
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("Failed to send SIGKILL to PID 1: {}", stderr);
+                }
+            }
+            Err(e) => {
+                error!("Failed to execute kill command for SIGKILL: {}", e);
+            }
+        }
+        
+        // Give a moment for SIGKILL to take effect
+        thread::sleep(Duration::from_secs(1));
+        info!("Container termination process completed");
+    } else {
+        info!("PID 1 terminated gracefully, no SIGKILL needed");
+    }
+
+    info!("=== Post-Backup Container Termination Completed ===");
+    Ok(())
 }
