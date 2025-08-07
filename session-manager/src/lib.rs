@@ -17,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::collections::HashSet;
 
 pub mod direct_restore;
+pub mod direct_restore_enhanced;
 mod optimized_io;
 mod resource_manager;
 mod async_operations;

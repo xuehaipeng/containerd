@@ -104,7 +104,3 @@ spec:
         hostPath:
           path: /shared/nb
           type: Directory
-      - name: backup-storage
-        hostPath:
-          path: /tecofs/nb-sessions/kubecube-workspace-214/nb-test-0/inference
-          type: Directory
