@@ -7,12 +7,23 @@ use std::path::PathBuf;
 use std::fs::OpenOptions;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Get version string with git hash and build timestamp
+fn get_version() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (git: ", env!("GIT_HASH"),
+        ", branch: ", env!("GIT_BRANCH"),
+        ", built: ", env!("BUILD_TIME"), ")"
+    )
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "session-backup",
-    about = "Lockless containerd session backup tool optimized for single-process operations"
+    about = "Lockless containerd session backup tool optimized for single-process operations",
+    version = get_version(),
 )]
 struct Args {
     #[arg(
@@ -93,11 +104,15 @@ fn init_file_logging(binary_name: &str) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Record start time for total execution timing
+    let start_time = Instant::now();
+    
     // Initialize file-based logging to /tmp
     init_file_logging("session-backup")?;
     let args = Args::parse();
 
     info!("=== Session Backup Tool Started (Lockless) ===");
+    info!("Version: {}", get_version());
     info!("Mappings file: {}", args.mappings_file.display());
     info!("Sessions path: {}", args.sessions_path.display());
     info!("Backup path: {}", args.backup_path.display());
@@ -214,6 +229,11 @@ fn main() -> Result<()> {
             }
         }
 
+        // Calculate and log total execution time
+        let total_duration = start_time.elapsed();
+        info!("=== Session Backup Completed Successfully ===");
+        info!("Total execution time: {:.3}s", total_duration.as_secs_f64());
+        
         Ok(())
     })
 }
@@ -226,6 +246,7 @@ fn perform_backup_operation(
     bypass_mounts: bool,
     dry_run: bool,
 ) -> Result<()> {
+    let backup_start_time = Instant::now();
     info!("Performing lockless backup: {} -> {}", source_dir.display(), backup_dir.display());
 
     // Create backup directory (lockless)
@@ -242,8 +263,19 @@ fn perform_backup_operation(
         info!("Using mount-bypass transfer for lockless backup");
         transfer_data_with_mount_bypass(source_dir, backup_dir, timeout, true)
     } else {
-        info!("Using standard transfer for lockless backup");
-        transfer_data(source_dir, backup_dir, timeout)
+        // Try ultra-fast parallel transfer first
+        info!("Attempting ultra-fast parallel transfer for lockless backup");
+        match transfer_data_ultra_fast(source_dir, backup_dir, timeout) {
+            Ok(result) if result.error_count == 0 => Ok(result),
+            Ok(result) => {
+                warn!("Ultra-fast transfer had {} errors, falling back to standard transfer", result.error_count);
+                transfer_data(source_dir, backup_dir, timeout)
+            }
+            Err(e) => {
+                warn!("Ultra-fast transfer failed: {}, falling back to standard transfer", e);
+                transfer_data(source_dir, backup_dir, timeout)
+            }
+        }
     };
 
     match transfer_result {
@@ -262,7 +294,9 @@ fn perform_backup_operation(
             
             // Consider backup successful even with some errors (common with busy files)
             if result.success_count > 0 || result.error_count == 0 {
+                let backup_duration = backup_start_time.elapsed();
                 info!("Lockless backup operation succeeded");
+                info!("Backup transfer time: {:.3}s", backup_duration.as_secs_f64());
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("Backup failed: {} errors, no successful transfers", result.error_count))

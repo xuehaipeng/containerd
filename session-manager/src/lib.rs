@@ -12,12 +12,14 @@ use once_cell::sync::Lazy;
 // Removed unused imports
 use std::num::NonZeroUsize;
 use std::collections::HashSet;
+use num_cpus;
 
 pub mod direct_restore;
 pub mod lockless_backup;
 mod optimized_io;
 mod resource_manager;
 mod async_operations;
+pub mod fast_copy;
 
 // Global LRU cache for path mappings
 static PATH_MAPPING_CACHE: Lazy<Arc<RwLock<LruCache<String, PathMapping>>>> = 
@@ -294,6 +296,49 @@ pub fn transfer_data_rsync(source: &Path, target: &Path, timeout: u64) -> Result
     }
 
     Ok(result)
+}
+
+/// Ultra-fast transfer using parallel copy with best available strategy
+pub fn transfer_data_ultra_fast(source: &Path, target: &Path, timeout: u64) -> Result<TransferResult> {
+    // Validate paths for security
+    validate_path_security(source, &PathBuf::from("/"))?;
+    validate_path_security(target, &PathBuf::from("/"))?;
+    
+    info!("Using ultra-fast parallel transfer from {} to {}", source.display(), target.display());
+    
+    let start_time = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(timeout);
+    
+    // Determine optimal number of workers based on system
+    let num_workers = num_cpus::get().min(32);
+    info!("Using {} parallel workers for transfer", num_workers);
+    
+    // Use the new parallel copy with best strategy (sendfile/splice/optimized buffer)
+    let stats = fast_copy::copy_directory_parallel(source, target, Some(num_workers))
+        .with_context(|| format!("Parallel copy failed from {} to {}", source.display(), target.display()))?;
+    
+    let (files, _bytes, errors, skipped) = stats.get_summary();
+    
+    // Check if operation timed out
+    if start_time.elapsed() > timeout_duration {
+        return Ok(TransferResult {
+            success_count: files,
+            error_count: errors + 1,
+            skipped_count: skipped,
+            errors: vec![format!("Operation timed out after {} seconds", timeout)],
+        });
+    }
+    
+    Ok(TransferResult {
+        success_count: files,
+        error_count: errors,
+        skipped_count: skipped,
+        errors: if errors > 0 { 
+            vec![format!("{} files failed to copy", errors)] 
+        } else { 
+            Vec::new() 
+        },
+    })
 }
 
 pub fn transfer_data_tar(source: &Path, target: &Path, timeout: u64) -> Result<TransferResult> {

@@ -5,11 +5,23 @@ use session_manager::*;
 use session_manager::direct_restore::DirectRestoreEngine;
 use std::path::PathBuf;
 use std::fs::OpenOptions;
+use std::time::Instant;
+
+/// Get version string with git hash and build timestamp
+fn get_version() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (git: ", env!("GIT_HASH"),
+        ", branch: ", env!("GIT_BRANCH"),
+        ", built: ", env!("BUILD_TIME"), ")"
+    )
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "session-restore",
-    about = "Containerd session restore tool with direct container root restoration"
+    about = "Containerd session restore tool with direct container root restoration",
+    version = get_version(),
 )]
 struct Args {
     #[arg(
@@ -77,11 +89,15 @@ fn init_file_logging(binary_name: &str) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Record start time for total execution timing
+    let start_time = Instant::now();
+    
     // Initialize file-based logging to /tmp
     init_file_logging("session-restore")?;
     let args = Args::parse();
 
     info!("=== Session Restore Tool Started (Direct Container Root Mode) ===");
+    info!("Version: {}", get_version());
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
@@ -164,6 +180,9 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Restoration failed: {} files failed, 0 succeeded", result.failed_files));
     }
 
+    // Calculate and log total execution time
+    let total_duration = start_time.elapsed();
     info!("=== Session Restore Completed Successfully ===");
+    info!("Total execution time: {:.3}s", total_duration.as_secs_f64());
     Ok(())
 }
