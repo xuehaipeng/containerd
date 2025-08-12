@@ -8,6 +8,23 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
+use libc::{posix_fadvise, POSIX_FADV_SEQUENTIAL, POSIX_FADV_DONTNEED};
+
+/// Apply posix_fadvise for sequential access pattern
+fn advise_sequential_access(file: &File, size: u64) {
+    let fd = file.as_raw_fd();
+    unsafe {
+        posix_fadvise(fd, 0, size as libc::off_t, POSIX_FADV_SEQUENTIAL);
+    }
+}
+
+/// Apply posix_fadvise to drop pages from cache (reduce cache pollution)
+fn advise_dont_need(file: &File, size: u64) {
+    let fd = file.as_raw_fd();
+    unsafe {
+        posix_fadvise(fd, 0, size as libc::off_t, POSIX_FADV_DONTNEED);
+    }
+}
 
 /// Check if a directory should be skipped based on device ID comparison
 pub fn should_skip_directory(dir: &Path, root_dev: u64) -> bool {
@@ -241,7 +258,7 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         return Ok(0); // Symlinks don't have size
     }
     
-    // For regular files, use the kernel-assisted copy chain
+    // For regular files, use the kernel-assisted copy chain with cache management
     let file_size = src_metadata.len();
     
     // Open files
@@ -260,6 +277,11 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         .open(dst)
         .with_context(|| format!("Failed to create destination: {}", dst.display()))?;
     
+    // Apply sequential access advice for large files (>1MB)
+    if file_size > 1024 * 1024 {
+        advise_sequential_access(&src_file, file_size);
+    }
+    
     // Try kernel-assisted copy methods in order
     #[cfg(target_os = "linux")]
     {
@@ -267,6 +289,12 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         match copy_file_with_copy_file_range(&src_file, &dst_file, file_size) {
             Ok(bytes) => {
                 debug!("Used copy_file_range for {}: {} bytes", src.display(), bytes);
+                
+                // Apply cache management for large files
+                if file_size > 1024 * 1024 {
+                    advise_dont_need(&src_file, file_size);
+                }
+                
                 // Copy permissions
                 let permissions = src_metadata.permissions();
                 fs::set_permissions(dst, permissions)?;
@@ -284,6 +312,12 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         match copy_file_with_sendfile(&src_file, &dst_file, file_size) {
             Ok(bytes) => {
                 debug!("Used sendfile for {}: {} bytes", src.display(), bytes);
+                
+                // Apply cache management for large files
+                if file_size > 1024 * 1024 {
+                    advise_dont_need(&src_file, file_size);
+                }
+                
                 // Copy permissions
                 let permissions = src_metadata.permissions();
                 fs::set_permissions(dst, permissions)?;
@@ -300,7 +334,16 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
     
     // 3. Fall back to buffered copy with adaptive buffer size
     debug!("Using buffered copy for {}", src.display());
-    copy_file_regular(src, dst)
+    let result = copy_file_regular(src, dst);
+    
+    // Apply cache management after buffered copy for large files
+    if file_size > 1024 * 1024 {
+        if let Ok(_) = &result {
+            advise_dont_need(&src_file, file_size);
+        }
+    }
+    
+    result
 }
 
 /// Statistics for parallel copy operation
@@ -375,8 +418,28 @@ pub fn copy_directory_parallel(
     
     info!("Found {} files to copy", total_tasks);
     
-    // Set up thread pool
-    let num_workers = max_workers.unwrap_or_else(|| num_cpus::get().min(32));
+    // Set up thread pool with filesystem-aware worker count
+    let num_workers = max_workers.unwrap_or_else(|| {
+        if is_network_filesystem(dst) {
+            // Conservative parallelism for network filesystems to avoid overwhelming them
+            let conservative_count = std::env::var("SESSION_MANAGER_NETWORK_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6); // Default 6 workers for network FS
+            
+            debug!("Detected network filesystem, using {} workers", conservative_count);
+            conservative_count
+        } else {
+            // Higher parallelism for local filesystems
+            let local_count = std::env::var("SESSION_MANAGER_LOCAL_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| num_cpus::get().min(32));
+                
+            debug!("Detected local filesystem, using {} workers", local_count);
+            local_count
+        }
+    });
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_workers)
         .thread_name(|i| format!("copy-worker-{}", i))

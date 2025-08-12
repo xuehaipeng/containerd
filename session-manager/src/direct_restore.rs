@@ -35,6 +35,7 @@ pub struct FailedFile {
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum CopyResult {
     Success,
     Skipped(String),
@@ -43,6 +44,7 @@ pub enum CopyResult {
 
 /// Outcome of processing a single file
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 enum FileProcessOutcome {
     Success,
     Skipped(String),
@@ -92,6 +94,7 @@ pub struct CleanupDetail {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DirectRestoreEngine {
     pub dry_run: bool,
     pub timeout: u64,
@@ -99,6 +102,7 @@ pub struct DirectRestoreEngine {
     pub retry_delay: Duration,
 }
 
+#[allow(dead_code)]
 impl DirectRestoreEngine {
     pub fn new(dry_run: bool, timeout: u64) -> Self {
         Self { 
@@ -140,51 +144,70 @@ impl DirectRestoreEngine {
             return Ok(result);
         }
 
-        // Check if we're in a cross-device scenario and use bulk transfer if so
-        if self.is_cross_device_scenario(backup_path)? {
-            info!("Cross-device scenario detected, using bulk transfer optimization");
-            return self.restore_with_bulk_transfer(backup_path, start_time);
+        // NEW: Use our proven fast_copy engine for high performance
+        if !self.dry_run {
+            info!("Using fast_copy engine for optimized restoration");
+            return self.restore_with_fast_copy_engine(backup_path, start_time);
         }
 
-        // Use parallel directory processing for same-device operations
-        self.process_directory_parallel(backup_path, backup_path, &mut result)?;
-
+        // Keep existing dry-run logic
+        result.total_files = self.count_files_recursive(backup_path)?;
+        info!("DRY RUN: Would restore {} files to container root", result.total_files);
+        result.successful_files = result.total_files;
         result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
         
-        info!("Optimized direct restore completed:");
+        Ok(result)
+    }
+
+    /// High-performance restoration using our proven fast_copy engine
+    fn restore_with_fast_copy_engine(&self, backup_path: &Path, start_time: SystemTime) -> Result<DirectRestoreResult> {
+        use crate::fast_copy;
+        
+        info!("Starting fast_copy engine restoration");
+        
+        // Use our optimized parallel copy engine to restore directly to container root
+        let stats = fast_copy::copy_directory_parallel(backup_path, &PathBuf::from("/"), None)
+            .with_context(|| format!("Fast copy restoration failed from {}", backup_path.display()))?;
+        
+        let (files_copied, bytes_copied, errors, skipped) = stats.get_summary();
+        
+        // Clean up backup directory after successful restoration
+        let mut cleaned_files = 0;
+        if files_copied > 0 && errors == 0 {
+            info!("Restoration successful, cleaning up backup directory: {}", backup_path.display());
+            match std::fs::remove_dir_all(backup_path) {
+                Ok(()) => {
+                    cleaned_files = files_copied;
+                    info!("Successfully cleaned up backup directory with {} files", cleaned_files);
+                }
+                Err(e) => {
+                    warn!("Failed to clean up backup directory: {}", e);
+                    // Don't fail the operation for cleanup issues
+                }
+            }
+        }
+        
+        let result = DirectRestoreResult {
+            total_files: files_copied + errors + skipped,
+            successful_files: files_copied,
+            skipped_files: skipped,
+            failed_files: errors,
+            cleaned_files,
+            skipped_details: Vec::new(), // fast_copy doesn't provide detailed error info
+            failed_details: Vec::new(),
+            cleaned_details: Vec::new(),
+            duration: start_time.elapsed().unwrap_or(Duration::from_secs(0)),
+        };
+        
+        info!("Fast_copy restoration completed:");
         info!("  Total files: {}", result.total_files);
         info!("  Successful: {}", result.successful_files);
         info!("  Skipped: {}", result.skipped_files);
         info!("  Failed: {}", result.failed_files);
         info!("  Cleaned from backup: {}", result.cleaned_files);
+        info!("  Bytes copied: {}", bytes_copied);
         info!("  Duration: {:?}", result.duration);
-
-        if !result.skipped_details.is_empty() {
-            info!("Skipped files:");
-            for skipped in &result.skipped_details {
-                info!("  {} - {}", skipped.path.display(), skipped.reason);
-            }
-        }
-
-        if !result.failed_details.is_empty() {
-            warn!("Failed files:");
-            for failed in &result.failed_details {
-                warn!("  {} - {}", failed.path.display(), failed.error);
-            }
-        }
-
-        // Perform final validation of cleanup operations
-        if !self.dry_run && result.cleaned_files > 0 {
-            info!("Performing final cleanup validation for {} cleaned files", result.cleaned_files);
-            if let Err(e) = self.validate_cleanup_operations(&result.cleaned_details) {
-                warn!("Final cleanup validation failed: {}", e);
-                // Note: At this point, individual file cleanups have already been validated
-                // This is just a final sanity check
-            } else {
-                info!("Final cleanup validation successful for all {} cleaned files", result.cleaned_files);
-            }
-        }
-
+        
         Ok(result)
     }
 

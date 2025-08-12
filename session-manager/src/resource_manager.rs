@@ -26,6 +26,7 @@ impl ThreadPoolManager {
         })
     }
     
+    #[allow(dead_code)]
     pub fn io_pool(&self) -> &rayon::ThreadPool {
         &self.io_pool
     }
