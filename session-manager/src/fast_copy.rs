@@ -6,6 +6,28 @@ use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::{AsRawFd, RawFd};
+
+/// Check if a directory should be skipped based on device ID comparison
+pub fn should_skip_directory(dir: &Path, root_dev: u64) -> bool {
+    match dir.metadata() {
+        Ok(meta) => {
+            let dir_dev = meta.dev();
+            if dir_dev != root_dev {
+                debug!("Skipping directory {} (different device: {} != {})", 
+                    dir.display(), dir_dev, root_dev);
+                true
+            } else {
+                false
+            }
+        }
+        Err(e) => {
+            warn!("Failed to get metadata for {}: {}", dir.display(), e);
+            false
+        }
+    }
+}
 
 /// Adaptive buffer size based on filesystem type
 pub fn get_optimal_buffer_size(path: &Path) -> usize {
@@ -47,9 +69,122 @@ fn find_mount_point(path: &Path, mounts: &str) -> Option<String> {
     best_match
 }
 
+/// System call wrapper for copy_file_range
+#[cfg(target_os = "linux")]
+fn copy_file_range_wrapper(
+    fd_in: RawFd,
+    off_in: Option<&mut i64>,
+    fd_out: RawFd,
+    off_out: Option<&mut i64>,
+    len: usize,
+) -> io::Result<usize> {
+    use libc::{c_int, off64_t, size_t};
+    
+    let off_in_ptr = match off_in {
+        Some(off) => off as *mut i64 as *mut off64_t,
+        None => std::ptr::null_mut(),
+    };
+    
+    let off_out_ptr = match off_out {
+        Some(off) => off as *mut i64 as *mut off64_t,
+        None => std::ptr::null_mut(),
+    };
+    
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_copy_file_range,
+            fd_in as c_int,
+            off_in_ptr,
+            fd_out as c_int,
+            off_out_ptr,
+            len as size_t,
+            0u32,
+        )
+    };
+    
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as usize)
+    }
+}
+
+/// Copy file using copy_file_range (Linux 4.5+)
+#[cfg(target_os = "linux")]
+fn copy_file_with_copy_file_range(src_file: &File, dst_file: &File, size: u64) -> io::Result<u64> {
+    let src_fd = src_file.as_raw_fd();
+    let dst_fd = dst_file.as_raw_fd();
+    
+    let mut copied = 0u64;
+    let chunk_size = 1024 * 1024 * 1024; // 1GB chunks
+    
+    while copied < size {
+        let to_copy = std::cmp::min(chunk_size, (size - copied) as usize);
+        
+        match copy_file_range_wrapper(src_fd, None, dst_fd, None, to_copy) {
+            Ok(0) => break, // EOF
+            Ok(n) => copied += n as u64,
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                // Cross-device, not supported
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "cross-device copy"));
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) || 
+                     e.raw_os_error() == Some(libc::EOPNOTSUPP) ||
+                     e.raw_os_error() == Some(libc::ENOSYS) => {
+                // Not supported
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "copy_file_range not supported"));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    
+    Ok(copied)
+}
+
+/// Copy file using sendfile (zero-copy when possible)
+#[cfg(target_os = "linux")]
+fn copy_file_with_sendfile(src_file: &File, dst_file: &File, size: u64) -> io::Result<u64> {
+    use libc::{sendfile64, off64_t};
+    
+    let src_fd = src_file.as_raw_fd();
+    let dst_fd = dst_file.as_raw_fd();
+    
+    let mut copied = 0u64;
+    let mut offset = 0i64;
+    
+    while copied < size {
+        let to_copy = std::cmp::min(0x7ffff000, (size - copied) as usize); // ~2GB max per call
+        
+        let result = unsafe {
+            sendfile64(
+                dst_fd,
+                src_fd,
+                &mut offset as *mut i64 as *mut off64_t,
+                to_copy,
+            )
+        };
+        
+        if result < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINVAL) || 
+               err.raw_os_error() == Some(libc::ENOSYS) {
+                // Not supported
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "sendfile not supported"));
+            }
+            return Err(err);
+        } else if result == 0 {
+            break; // EOF
+        } else {
+            copied += result as u64;
+        }
+    }
+    
+    Ok(copied)
+}
+
 /// Regular file copy with adaptive buffer size
 pub fn copy_file_regular(src: &Path, dst: &Path) -> Result<u64> {
-    let buffer_size = get_optimal_buffer_size(src);
+    let buffer_size = get_optimal_buffer_size(dst);
     
     let src_file = File::open(src)
         .with_context(|| format!("Failed to open source: {}", src.display()))?;
@@ -80,10 +215,91 @@ pub fn copy_file_regular(src: &Path, dst: &Path) -> Result<u64> {
     Ok(bytes_copied)
 }
 
-/// Copy file using the best available strategy
+/// Copy file using the best available strategy with kernel-assisted fallback chain
 pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
-    // For now, use the optimized regular copy with adaptive buffer sizing
-    debug!("Using optimized copy with adaptive buffer for {}", src.display());
+    // Check if source is a symlink
+    let src_metadata = fs::symlink_metadata(src)?;
+    
+    if src_metadata.is_symlink() {
+        // Handle symlink copying
+        let target = fs::read_link(src)
+            .with_context(|| format!("Failed to read symlink: {}", src.display()))?;
+        
+        // Create parent directory if needed
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        
+        // Remove destination if it exists
+        let _ = fs::remove_file(dst);
+        
+        // Create the symlink
+        std::os::unix::fs::symlink(&target, dst)
+            .with_context(|| format!("Failed to create symlink: {} -> {}", dst.display(), target.display()))?;
+        
+        debug!("Created symlink: {} -> {}", dst.display(), target.display());
+        return Ok(0); // Symlinks don't have size
+    }
+    
+    // For regular files, use the kernel-assisted copy chain
+    let file_size = src_metadata.len();
+    
+    // Open files
+    let src_file = File::open(src)
+        .with_context(|| format!("Failed to open source: {}", src.display()))?;
+    
+    // Create parent directory if needed
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    let dst_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)
+        .with_context(|| format!("Failed to create destination: {}", dst.display()))?;
+    
+    // Try kernel-assisted copy methods in order
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Try copy_file_range first (best for same filesystem)
+        match copy_file_with_copy_file_range(&src_file, &dst_file, file_size) {
+            Ok(bytes) => {
+                debug!("Used copy_file_range for {}: {} bytes", src.display(), bytes);
+                // Copy permissions
+                let permissions = src_metadata.permissions();
+                fs::set_permissions(dst, permissions)?;
+                return Ok(bytes);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                debug!("copy_file_range not supported, trying sendfile");
+            }
+            Err(e) => {
+                debug!("copy_file_range failed: {}, trying sendfile", e);
+            }
+        }
+        
+        // 2. Try sendfile (zero-copy for regular files)
+        match copy_file_with_sendfile(&src_file, &dst_file, file_size) {
+            Ok(bytes) => {
+                debug!("Used sendfile for {}: {} bytes", src.display(), bytes);
+                // Copy permissions
+                let permissions = src_metadata.permissions();
+                fs::set_permissions(dst, permissions)?;
+                return Ok(bytes);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                debug!("sendfile not supported, falling back to buffered copy");
+            }
+            Err(e) => {
+                debug!("sendfile failed: {}, falling back to buffered copy", e);
+            }
+        }
+    }
+    
+    // 3. Fall back to buffered copy with adaptive buffer size
+    debug!("Using buffered copy for {}", src.display());
     copy_file_regular(src, dst)
 }
 
@@ -143,11 +359,18 @@ pub fn copy_directory_parallel(
     
     info!("Starting parallel copy from {} to {}", src.display(), dst.display());
     
+    // Get the device ID of the source root for mount detection
+    let root_dev = fs::metadata(src)
+        .with_context(|| format!("Failed to get metadata for source: {}", src.display()))?
+        .dev();
+    
+    info!("Source root device ID: {}", root_dev);
+    
     // Create destination directory
     fs::create_dir_all(dst)?;
     
-    // Collect all files to copy
-    let tasks = collect_copy_tasks(src, dst)?;
+    // Collect all files to copy (with mount bypass)
+    let tasks = collect_copy_tasks(src, dst, root_dev)?;
     let total_tasks = tasks.len();
     
     info!("Found {} files to copy", total_tasks);
@@ -203,10 +426,10 @@ pub fn copy_directory_parallel(
     Ok(stats)
 }
 
-/// Collect all files to copy recursively
-fn collect_copy_tasks(src: &Path, dst: &Path) -> Result<Vec<CopyTask>> {
+/// Collect all files to copy recursively with device ID-based mount bypass
+fn collect_copy_tasks(src: &Path, dst: &Path, root_dev: u64) -> Result<Vec<CopyTask>> {
     let mut tasks = Vec::new();
-    collect_copy_tasks_recursive(src, dst, src, &mut tasks)?;
+    collect_copy_tasks_recursive(src, dst, src, &mut tasks, root_dev)?;
     Ok(tasks)
 }
 
@@ -215,6 +438,7 @@ fn collect_copy_tasks_recursive(
     dst_root: &Path,
     src_root: &Path,
     tasks: &mut Vec<CopyTask>,
+    root_dev: u64,
 ) -> Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
@@ -223,10 +447,25 @@ fn collect_copy_tasks_recursive(
         let dst_path = dst_root.join(relative);
         
         let metadata = entry.metadata()?;
+        
         if metadata.is_dir() {
+            // Check if this directory is on a different device (mount point)
+            if should_skip_directory(&path, root_dev) {
+                info!("Skipping mounted directory: {}", path.display());
+                continue;
+            }
+            
             fs::create_dir_all(&dst_path)?;
-            collect_copy_tasks_recursive(&path, dst_root, src_root, tasks)?;
+            collect_copy_tasks_recursive(&path, dst_root, src_root, tasks, root_dev)?;
         } else if metadata.is_file() {
+            tasks.push(CopyTask {
+                src: path.clone(),
+                dst: dst_path,
+                relative_path: relative.to_path_buf(),
+            });
+        } else if metadata.is_symlink() {
+            // Handle symlinks - just record them as tasks
+            // The actual symlink creation will be handled separately
             tasks.push(CopyTask {
                 src: path.clone(),
                 dst: dst_path,
