@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use crossbeam_channel::{unbounded, Sender};
@@ -20,13 +21,6 @@ fn should_fsync_files() -> bool {
     std::env::var("SESSION_MANAGER_FSYNC")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(true) // Default to true for data safety
-}
-
-/// Check if directories should be synced after batch operations
-fn should_fsync_directories() -> bool {
-    std::env::var("SESSION_MANAGER_FSYNC_DIRS")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false) // Default to false for performance (dirs are less critical)
 }
 
 /// Apply posix_fadvise for sequential access pattern
@@ -242,6 +236,7 @@ pub fn copy_file_regular(src: &Path, dst: &Path) -> Result<u64> {
         fs::create_dir_all(parent)?;
     }
     
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let dst_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -317,6 +312,7 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         fs::create_dir_all(parent)?;
     }
     
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let dst_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -476,7 +472,7 @@ struct CopyTask {
 pub fn copy_directory_parallel(
     src: &Path,
     dst: &Path,
-    max_workers: Option<usize>,
+    _max_workers: Option<usize>, // Ignored - using unified ResourceManager thread pool
 ) -> Result<CopyStats> {
     let stats = Arc::new(CopyStats::new());
     let start_time = Instant::now();
