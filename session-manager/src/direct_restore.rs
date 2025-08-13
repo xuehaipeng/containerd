@@ -100,6 +100,7 @@ pub struct DirectRestoreEngine {
     pub timeout: u64,
     pub max_retries: u32,
     pub retry_delay: Duration,
+    pub skip_cleanup: bool,
 }
 
 #[allow(dead_code)]
@@ -110,7 +111,16 @@ impl DirectRestoreEngine {
             timeout,
             max_retries: 3,
             retry_delay: Duration::from_millis(500),
+            skip_cleanup: false,  // Default to cleanup for backward compatibility
         }
+    }
+    
+    pub fn with_skip_cleanup(mut self, skip_cleanup: bool) -> Self {
+        self.skip_cleanup = skip_cleanup;
+        if skip_cleanup {
+            info!("Backup cleanup disabled - files will be preserved for crash recovery");
+        }
+        self
     }
 
     pub fn with_retry_config(mut self, max_retries: u32, retry_delay: Duration) -> Self {
@@ -171,9 +181,9 @@ impl DirectRestoreEngine {
         
         let (files_copied, bytes_copied, errors, skipped) = stats.get_summary();
         
-        // Clean up backup directory after successful restoration
+        // Clean up backup directory after successful restoration (only if cleanup is enabled)
         let mut cleaned_files = 0;
-        if files_copied > 0 && errors == 0 {
+        if !self.skip_cleanup && files_copied > 0 && errors == 0 {
             info!("Restoration successful, cleaning up backup directory: {}", backup_path.display());
             match std::fs::remove_dir_all(backup_path) {
                 Ok(()) => {
@@ -185,6 +195,8 @@ impl DirectRestoreEngine {
                     // Don't fail the operation for cleanup issues
                 }
             }
+        } else if self.skip_cleanup {
+            info!("Skipping backup cleanup - preserving backup files for crash recovery");
         }
         
         let result = DirectRestoreResult {
@@ -281,15 +293,20 @@ impl DirectRestoreEngine {
                 result.cleaned_files = transferred_count;
                 info!("Bulk transfer completed successfully: {} files", transferred_count);
                 
-                // Clean up backup directory after successful transfer
-                match fs::remove_dir_all(backup_path) {
-                    Ok(()) => {
-                        info!("Successfully cleaned up backup directory: {}", backup_path.display());
+                // Clean up backup directory after successful transfer (only if cleanup is enabled)
+                if !self.skip_cleanup {
+                    match fs::remove_dir_all(backup_path) {
+                        Ok(()) => {
+                            info!("Successfully cleaned up backup directory: {}", backup_path.display());
+                        }
+                        Err(e) => {
+                            warn!("Failed to clean up backup directory: {}", e);
+                            // Don't fail the operation for cleanup issues
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to clean up backup directory: {}", e);
-                        // Don't fail the operation for cleanup issues
-                    }
+                } else {
+                    info!("Skipping backup cleanup - preserving backup files for crash recovery");
+                    result.cleaned_files = 0;  // Reset cleaned files count since we're not cleaning
                 }
             }
             Err(e) => {
@@ -887,8 +904,8 @@ impl DirectRestoreEngine {
                             warn!("Copied file validation failed for {}: {}", target_path.display(), e);
                         }
                         
-                        // Clean up backup file after successful copy
-                        if !self.dry_run {
+                        // Clean up backup file after successful copy (only if cleanup is enabled)
+                        if !self.dry_run && !self.skip_cleanup {
                             match self.validate_file_before_cleanup(backup_file_path, &target_path) {
                                 Ok(()) => {
                                     match self.cleanup_backup_file(backup_file_path) {
@@ -904,6 +921,9 @@ impl DirectRestoreEngine {
                                     Ok(FileProcessOutcome::Success)
                                 }
                             }
+                        } else if self.skip_cleanup {
+                            debug!("Skipping backup file cleanup for: {}", backup_file_path.display());
+                            Ok(FileProcessOutcome::Success)
                         } else {
                             Ok(FileProcessOutcome::Success)
                         }
@@ -996,6 +1016,12 @@ impl DirectRestoreEngine {
             info!("DRY RUN: Would move {} -> {}", src.display(), dst.display());
             return CopyResult::Success;
         }
+        
+        // If skip_cleanup is enabled, always use copy instead of move to preserve backup files
+        if self.skip_cleanup {
+            debug!("Skip cleanup enabled - using copy instead of move for: {}", src.display());
+            return self.copy_file_with_fallback(src, dst);
+        }
 
         // Create parent directories if needed
         if let Some(parent) = dst.parent() {
@@ -1008,20 +1034,25 @@ impl DirectRestoreEngine {
         match fs::symlink_metadata(src) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
-                    // Handle symlinks specially - copy symlink, then remove original
+                    // Handle symlinks specially - copy symlink, then remove original (only if cleanup enabled)
                     match self.copy_symlink(src, dst) {
                         Ok(()) => {
-                            // Remove original symlink after successful copy
-                            match fs::remove_file(src) {
-                                Ok(()) => {
-                                    debug!("Successfully moved symlink: {} -> {}", src.display(), dst.display());
-                                    CopyResult::Success
+                            if !self.skip_cleanup {
+                                // Remove original symlink after successful copy
+                                match fs::remove_file(src) {
+                                    Ok(()) => {
+                                        debug!("Successfully moved symlink: {} -> {}", src.display(), dst.display());
+                                        CopyResult::Success
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to remove source symlink after copy: {}", e);
+                                        // Symlink was copied successfully, consider it a success
+                                        CopyResult::Success
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to remove source symlink after copy: {}", e);
-                                    // Symlink was copied successfully, consider it a success
-                                    CopyResult::Success
-                                }
+                            } else {
+                                debug!("Copied symlink (cleanup disabled): {} -> {}", src.display(), dst.display());
+                                CopyResult::Success
                             }
                         }
                         Err(e) => CopyResult::Failed(format!("Failed to move symlink: {}", e)),

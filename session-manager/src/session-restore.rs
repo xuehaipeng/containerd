@@ -60,6 +60,9 @@ struct Args {
 
     #[arg(long, help = "Dry run mode - don't actually copy files")]
     dry_run: bool,
+    
+    #[arg(long, help = "Skip backup cleanup after restoration (safer for crash recovery)")]
+    skip_cleanup: bool,
 }
 
 fn init_file_logging(binary_name: &str) -> Result<()> {
@@ -102,6 +105,7 @@ fn main() -> Result<()> {
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
+    info!("Skip cleanup: {}", args.skip_cleanup);
 
     // Get current pod information
     let pod_info = PodInfo::from_args_and_env(
@@ -151,7 +155,8 @@ fn main() -> Result<()> {
     show_directory_contents(&args.backup_path)?;
 
     // Create direct restore engine
-    let restore_engine = DirectRestoreEngine::new(args.dry_run, args.timeout);
+    let restore_engine = DirectRestoreEngine::new(args.dry_run, args.timeout)
+        .with_skip_cleanup(args.skip_cleanup);
 
     // Perform direct container root restoration
     info!("Starting direct container root restoration from {}...", args.backup_path.display());
