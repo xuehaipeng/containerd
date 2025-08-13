@@ -6,6 +6,7 @@ use session_manager::direct_restore::DirectRestoreEngine;
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 use std::time::Instant;
+use chrono;
 
 /// Get version string with git hash and build timestamp
 fn get_version() -> &'static str {
@@ -117,12 +118,30 @@ fn main() -> Result<()> {
     // Validate backup storage directory exists and has content
     if !args.backup_path.exists() {
         warn!("Backup storage directory does not exist: {}", args.backup_path.display());
+        
+        // Create completion marker even when no backup data exists
+        let completion_marker_path = "/tmp/session-restore-complete";
+        if let Err(e) = std::fs::write(completion_marker_path, format!("no backup data at {}", chrono::Utc::now().to_rfc3339())) {
+            warn!("Failed to create completion marker at {}: {}", completion_marker_path, e);
+        } else {
+            info!("Created completion marker: {}", completion_marker_path);
+        }
+        
         info!("=== Session Restore Completed (No Backup Data) ===");
         return Ok(());
     }
 
     if is_directory_empty(&args.backup_path)? {
         warn!("Backup storage directory is empty: {}", args.backup_path.display());
+        
+        // Create completion marker even when backup directory is empty
+        let completion_marker_path = "/tmp/session-restore-complete";
+        if let Err(e) = std::fs::write(completion_marker_path, format!("empty backup data at {}", chrono::Utc::now().to_rfc3339())) {
+            warn!("Failed to create completion marker at {}: {}", completion_marker_path, e);
+        } else {
+            info!("Created completion marker: {}", completion_marker_path);
+        }
+        
         info!("=== Session Restore Completed (Empty Backup Data) ===");
         return Ok(());
     }
@@ -182,6 +201,16 @@ fn main() -> Result<()> {
 
     // Calculate and log total execution time
     let total_duration = start_time.elapsed();
+    
+    // Create completion marker for synchronization with main container process
+    let completion_marker_path = "/tmp/session-restore-complete";
+    if let Err(e) = std::fs::write(completion_marker_path, format!("completed at {}", chrono::Utc::now().to_rfc3339())) {
+        warn!("Failed to create completion marker at {}: {}", completion_marker_path, e);
+        // Don't fail the operation for marker creation issues
+    } else {
+        info!("Created completion marker: {}", completion_marker_path);
+    }
+    
     info!("=== Session Restore Completed Successfully ===");
     info!("Total execution time: {:.3}s", total_duration.as_secs_f64());
     Ok(())
