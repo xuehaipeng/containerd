@@ -500,7 +500,7 @@ pub fn copy_directory_parallel(
         debug!("Detected local filesystem - using unified thread pool");
     }
     
-    // STREAMING OPTIMIZATION: Producer-Consumer Pattern
+    // STREAMING OPTIMIZATION: Producer-Consumer Pattern  
     // Channel capacity: buffer to balance memory usage vs latency
     let (task_sender, task_receiver) = unbounded::<CopyTask>();
     let stats_ref = Arc::clone(&stats);
@@ -555,6 +555,10 @@ pub fn copy_directory_parallel(
     let total_tasks = producer_handle.join()
         .map_err(|_| anyhow::anyhow!("Producer thread panicked"))?
         .unwrap_or(0);
+    // producer's stats_for_producer clone is dropped when thread finishes
+    
+    // CRITICAL: Drop the last Arc clone before try_unwrap
+    drop(stats_ref);
     
     let (files, bytes, errors, skipped) = stats.get_summary();
     let elapsed = start_time.elapsed();
