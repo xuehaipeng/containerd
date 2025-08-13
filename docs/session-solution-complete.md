@@ -29,7 +29,6 @@ Successfully implemented the correct session backup and restore functionality wi
 Key Features:
 - ✅ Parses path mappings to find current session directory
 - ✅ Backs up from actual session directory (not container root)
-- ✅ Uses `rsync` with `--ignore-errors` and `--force` flags
 - ✅ Fallback to `tar` with `--ignore-failed-read` for problematic files
 - ✅ Graceful handling of busy/read-only files
 - ✅ Comprehensive logging and debugging

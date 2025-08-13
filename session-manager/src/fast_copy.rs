@@ -8,9 +8,29 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::Arc;
+use crossbeam_channel::{unbounded, Sender};
+use crate::resource_manager::ResourceManager;
+
+#[cfg(target_os = "linux")]
 use libc::{posix_fadvise, POSIX_FADV_SEQUENTIAL, POSIX_FADV_DONTNEED};
 
+/// Check if files should be synced to disk after copy (configurable for performance)
+fn should_fsync_files() -> bool {
+    std::env::var("SESSION_MANAGER_FSYNC")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(true) // Default to true for data safety
+}
+
+/// Check if directories should be synced after batch operations
+fn should_fsync_directories() -> bool {
+    std::env::var("SESSION_MANAGER_FSYNC_DIRS")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false) // Default to false for performance (dirs are less critical)
+}
+
 /// Apply posix_fadvise for sequential access pattern
+#[cfg(target_os = "linux")]
 fn advise_sequential_access(file: &File, size: u64) {
     let fd = file.as_raw_fd();
     unsafe {
@@ -18,12 +38,23 @@ fn advise_sequential_access(file: &File, size: u64) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn advise_sequential_access(_file: &File, _size: u64) {
+    // No-op on non-Linux platforms
+}
+
 /// Apply posix_fadvise to drop pages from cache (reduce cache pollution)
+#[cfg(target_os = "linux")]
 fn advise_dont_need(file: &File, size: u64) {
     let fd = file.as_raw_fd();
     unsafe {
         posix_fadvise(fd, 0, size as libc::off_t, POSIX_FADV_DONTNEED);
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn advise_dont_need(_file: &File, _size: u64) {
+    // No-op on non-Linux platforms
 }
 
 /// Check if a directory should be skipped based on device ID comparison
@@ -199,7 +230,7 @@ fn copy_file_with_sendfile(src_file: &File, dst_file: &File, size: u64) -> io::R
     Ok(copied)
 }
 
-/// Regular file copy with adaptive buffer size
+/// Regular file copy with adaptive buffer size and optional fsync for durability
 pub fn copy_file_regular(src: &Path, dst: &Path) -> Result<u64> {
     let buffer_size = get_optimal_buffer_size(dst);
     
@@ -222,12 +253,28 @@ pub fn copy_file_regular(src: &Path, dst: &Path) -> Result<u64> {
     let mut writer = BufWriter::with_capacity(buffer_size, dst_file);
     
     let bytes_copied = io::copy(&mut reader, &mut writer)?;
-    writer.flush()?;
+    let dst_file = writer.into_inner()
+        .map_err(|e| anyhow::anyhow!("Failed to flush buffer: {}", e.error()))?;
     
-    // Copy file permissions
+    // DURABILITY: Configurable fsync for data safety
+    if should_fsync_files() {
+        dst_file.sync_all()
+            .with_context(|| format!("Failed to sync file to disk: {}", dst.display()))?;
+        debug!("Synced file to disk: {}", dst.display());
+    }
+    
+    // Copy file permissions and timestamps
     let src_metadata = fs::metadata(src)?;
     let permissions = src_metadata.permissions();
     fs::set_permissions(dst, permissions)?;
+    
+    // Preserve mtime as requested by reviewer
+    if let Ok(mtime) = src_metadata.modified() {
+        if let Err(e) = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(mtime)) {
+            debug!("Failed to preserve mtime for {}: {}", dst.display(), e);
+            // Don't fail the operation for timestamp issues
+        }
+    }
     
     Ok(bytes_copied)
 }
@@ -295,9 +342,25 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
                     advise_dont_need(&src_file, file_size);
                 }
                 
-                // Copy permissions
+                // DURABILITY: Sync file to disk if enabled
+                if should_fsync_files() {
+                    dst_file.sync_all()
+                        .with_context(|| format!("Failed to sync file to disk: {}", dst.display()))?;
+                    debug!("Synced file to disk: {}", dst.display());
+                }
+                
+                // Copy permissions and timestamps
                 let permissions = src_metadata.permissions();
                 fs::set_permissions(dst, permissions)?;
+                
+                // Preserve mtime as requested by reviewer
+                if let Ok(mtime) = src_metadata.modified() {
+                    if let Err(e) = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(mtime)) {
+                        debug!("Failed to preserve mtime for {}: {}", dst.display(), e);
+                        // Don't fail the operation for timestamp issues
+                    }
+                }
+                
                 return Ok(bytes);
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
@@ -318,9 +381,25 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
                     advise_dont_need(&src_file, file_size);
                 }
                 
-                // Copy permissions
+                // DURABILITY: Sync file to disk if enabled
+                if should_fsync_files() {
+                    dst_file.sync_all()
+                        .with_context(|| format!("Failed to sync file to disk: {}", dst.display()))?;
+                    debug!("Synced file to disk: {}", dst.display());
+                }
+                
+                // Copy permissions and timestamps
                 let permissions = src_metadata.permissions();
                 fs::set_permissions(dst, permissions)?;
+                
+                // Preserve mtime as requested by reviewer
+                if let Ok(mtime) = src_metadata.modified() {
+                    if let Err(e) = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(mtime)) {
+                        debug!("Failed to preserve mtime for {}: {}", dst.display(), e);
+                        // Don't fail the operation for timestamp issues
+                    }
+                }
+                
                 return Ok(bytes);
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
@@ -369,6 +448,7 @@ impl CopyStats {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
     
+    /// Add skipped file count (for special files, mount points, etc.)
     pub fn add_skipped(&self) {
         self.skipped.fetch_add(1, Ordering::Relaxed);
     }
@@ -391,16 +471,17 @@ struct CopyTask {
     relative_path: PathBuf,
 }
 
-/// Copy directory using parallel processing with Rayon
+/// Copy directory using streaming parallel processing with producer-consumer pattern
+/// This version starts copying immediately while traversal continues in background
 pub fn copy_directory_parallel(
     src: &Path,
     dst: &Path,
     max_workers: Option<usize>,
 ) -> Result<CopyStats> {
-    let stats = CopyStats::new();
+    let stats = Arc::new(CopyStats::new());
     let start_time = Instant::now();
     
-    info!("Starting parallel copy from {} to {}", src.display(), dst.display());
+    info!("Starting streaming parallel copy from {} to {}", src.display(), dst.display());
     
     // Get the device ID of the source root for mount detection
     let root_dev = fs::metadata(src)
@@ -412,49 +493,55 @@ pub fn copy_directory_parallel(
     // Create destination directory
     fs::create_dir_all(dst)?;
     
-    // Collect all files to copy (with mount bypass)
-    let tasks = collect_copy_tasks(src, dst, root_dev)?;
-    let total_tasks = tasks.len();
+    // THREAD POOL UNIFICATION: Use global ResourceManager instead of creating separate pool
+    // This prevents oversubscription issues when both fast_copy and ResourceManager are used
+    let resource_manager = ResourceManager::global();
     
-    info!("Found {} files to copy", total_tasks);
+    // Log filesystem type for debugging (but use unified pool regardless)
+    if is_network_filesystem(dst) {
+        debug!("Detected network filesystem - using unified thread pool with backpressure");
+    } else {
+        debug!("Detected local filesystem - using unified thread pool");
+    }
     
-    // Set up thread pool with filesystem-aware worker count
-    let num_workers = max_workers.unwrap_or_else(|| {
-        if is_network_filesystem(dst) {
-            // Conservative parallelism for network filesystems to avoid overwhelming them
-            let conservative_count = std::env::var("SESSION_MANAGER_NETWORK_WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(6); // Default 6 workers for network FS
-            
-            debug!("Detected network filesystem, using {} workers", conservative_count);
-            conservative_count
-        } else {
-            // Higher parallelism for local filesystems
-            let local_count = std::env::var("SESSION_MANAGER_LOCAL_WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| num_cpus::get().min(32));
-                
-            debug!("Detected local filesystem, using {} workers", local_count);
-            local_count
+    // STREAMING OPTIMIZATION: Producer-Consumer Pattern
+    // Channel capacity: buffer to balance memory usage vs latency
+    let (task_sender, task_receiver) = unbounded::<CopyTask>();
+    let stats_ref = Arc::clone(&stats);
+    
+    // Clone paths for the producer thread
+    let src_path = src.to_path_buf();
+    let dst_path = dst.to_path_buf();
+    let stats_for_producer = Arc::clone(&stats);
+    
+    // Spawn producer thread to stream copy tasks
+    let producer_handle = std::thread::spawn(move || -> Result<usize> {
+        let result = stream_copy_tasks(&src_path, &dst_path, root_dev, task_sender.clone(), &stats_for_producer);
+        
+        // Close channel to signal completion
+        drop(task_sender);
+        
+        match result {
+            Ok(count) => {
+                info!("Producer finished: {} tasks queued", count);
+                Ok(count)
+            }
+            Err(e) => {
+                warn!("Producer failed: {}", e);
+                Err(e)
+            }
         }
     });
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_workers)
-        .thread_name(|i| format!("copy-worker-{}", i))
-        .build()?;
     
-    // Process files in parallel
-    let stats_ref = &stats;
-    pool.install(|| {
-        tasks.par_iter().for_each(|task| {
+    // Start consumer threads immediately (copying while traversal continues)
+    resource_manager.thread_pool.io_pool().install(|| {
+        task_receiver.into_iter().par_bridge().for_each(|task| {
             // Create parent directory if needed
             if let Some(parent) = task.dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             
-            // Copy the file
+            // Copy the file with improved error handling
             match copy_file_best_strategy(&task.src, &task.dst) {
                 Ok(bytes) => {
                     stats_ref.add_file(bytes);
@@ -468,6 +555,11 @@ pub fn copy_directory_parallel(
         });
     });
     
+    // Wait for producer to complete and get task count
+    let total_tasks = producer_handle.join()
+        .map_err(|_| anyhow::anyhow!("Producer thread panicked"))?
+        .unwrap_or(0);
+    
     let (files, bytes, errors, skipped) = stats.get_summary();
     let elapsed = start_time.elapsed();
     let throughput = if elapsed.as_secs() > 0 {
@@ -477,63 +569,121 @@ pub fn copy_directory_parallel(
     };
     
     info!(
-        "Parallel copy completed in {:.2}s: {} files, {} bytes ({}/s), {} errors, {} skipped",
+        "Streaming parallel copy completed in {:.2}s: {} files, {} bytes ({}/s), {} errors, {} skipped (from {} tasks)",
         elapsed.as_secs_f64(),
         files,
         bytes,
         format_bytes(throughput),
         errors,
-        skipped
+        skipped,
+        total_tasks
     );
     
-    Ok(stats)
+    // Extract CopyStats from Arc for return
+    Arc::try_unwrap(stats)
+        .map_err(|_| anyhow::anyhow!("Failed to unwrap CopyStats Arc"))
 }
 
-/// Collect all files to copy recursively with device ID-based mount bypass
-fn collect_copy_tasks(src: &Path, dst: &Path, root_dev: u64) -> Result<Vec<CopyTask>> {
-    let mut tasks = Vec::new();
-    collect_copy_tasks_recursive(src, dst, src, &mut tasks, root_dev)?;
-    Ok(tasks)
+/// Stream copy tasks to channel as they are discovered (memory-efficient producer)
+/// This replaces collect_copy_tasks for better memory usage and immediate start
+fn stream_copy_tasks(
+    src: &Path, 
+    dst: &Path, 
+    root_dev: u64, 
+    sender: Sender<CopyTask>,
+    stats: &CopyStats,
+) -> Result<usize> {
+    let mut task_count = 0;
+    stream_copy_tasks_recursive(src, dst, src, &sender, root_dev, &mut task_count, stats)?;
+    info!("Task producer completed: {} tasks streamed", task_count);
+    Ok(task_count)
 }
 
-fn collect_copy_tasks_recursive(
-    current: &Path,
-    dst_root: &Path,
+/// Recursive streaming task producer - immediately sends tasks to channel
+fn stream_copy_tasks_recursive(
+    current_src: &Path,
+    current_dst: &Path,
     src_root: &Path,
-    tasks: &mut Vec<CopyTask>,
+    sender: &Sender<CopyTask>,
     root_dev: u64,
+    task_count: &mut usize,
+    stats: &CopyStats,
 ) -> Result<()> {
-    for entry in fs::read_dir(current)? {
+    // Skip directories on different devices (mount points)
+    if should_skip_directory(current_src, root_dev) {
+        debug!("Skipping mounted directory: {}", current_src.display());
+        stats.add_skipped(); // Count mounted directories as skipped
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(current_src)
+        .with_context(|| format!("Failed to read directory: {}", current_src.display()))?;
+
+    for entry in entries {
         let entry = entry?;
-        let path = entry.path();
-        let relative = path.strip_prefix(src_root)?;
-        let dst_path = dst_root.join(relative);
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        let dst_path = current_dst.join(&file_name);
         
-        let metadata = entry.metadata()?;
-        
+        let metadata = entry.metadata()
+            .with_context(|| format!("Failed to get metadata for: {}", src_path.display()))?;
+
         if metadata.is_dir() {
-            // Check if this directory is on a different device (mount point)
-            if should_skip_directory(&path, root_dev) {
-                info!("Skipping mounted directory: {}", path.display());
-                continue;
+            // Recursively stream tasks from subdirectory
+            stream_copy_tasks_recursive(&src_path, &dst_path, src_root, sender, root_dev, task_count, stats)?;
+        } else if metadata.is_file() || metadata.file_type().is_symlink() {
+            // Create relative path for logging
+            let relative_path = src_path.strip_prefix(src_root)
+                .unwrap_or(&src_path)
+                .to_path_buf();
+            
+            let task = CopyTask {
+                src: src_path.clone(),
+                dst: dst_path.clone(),
+                relative_path,
+            };
+            
+            // Send task to workers immediately
+            sender.send(task)
+                .map_err(|_| anyhow::anyhow!("Failed to send copy task - channel closed"))?;
+            
+            *task_count += 1;
+            
+            // Log progress for large directory trees
+            if *task_count % 10000 == 0 {
+                debug!("Queued {} copy tasks...", task_count);
+            }
+        } else {
+            // Handle special files (devices, sockets, FIFOs, etc.) - track as skipped
+            let file_type = metadata.file_type();
+            
+            // Use Unix-specific file type checking (requires std::os::unix)
+            #[cfg(unix)]
+            let type_description = {
+                use std::os::unix::fs::FileTypeExt;
+                if file_type.is_block_device() {
+                    "block device"
+                } else if file_type.is_char_device() {
+                    "character device"
+                } else if file_type.is_fifo() {
+                    "FIFO/pipe"
+                } else if file_type.is_socket() {
+                    "socket"
+                } else {
+                    "unknown special file"
+                }
+            };
+            
+            #[cfg(not(unix))]
+            let type_description = "special file";
+            
+            if *task_count < 100 {
+                info!("Skipping {}: {}", type_description, src_path.display());
+            } else {
+                debug!("Skipping {}: {}", type_description, src_path.display());
             }
             
-            fs::create_dir_all(&dst_path)?;
-            collect_copy_tasks_recursive(&path, dst_root, src_root, tasks, root_dev)?;
-        } else if metadata.is_file() {
-            tasks.push(CopyTask {
-                src: path.clone(),
-                dst: dst_path,
-                relative_path: relative.to_path_buf(),
-            });
-        } else if metadata.is_symlink() {
-            // Handle symlinks - just record them as tasks
-            // The actual symlink creation will be handled separately
-            tasks.push(CopyTask {
-                src: path.clone(),
-                dst: dst_path,
-                relative_path: relative.to_path_buf(),
-            });
+            stats.add_skipped(); // Properly account for skipped special files
         }
     }
     
