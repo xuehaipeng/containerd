@@ -102,6 +102,7 @@ fn main() -> Result<()> {
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
+    info!("Using COPY-ONLY mode for crash safety - cleanup happens after full success");
 
     // Get current pod information
     let pod_info = PodInfo::from_args_and_env(

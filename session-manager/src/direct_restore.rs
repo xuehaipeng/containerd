@@ -171,10 +171,11 @@ impl DirectRestoreEngine {
         
         let (files_copied, bytes_copied, errors, skipped) = stats.get_summary();
         
-        // Clean up backup directory after successful restoration
+        // CRITICAL SAFETY: Only cleanup backup after ALL files successfully copied
+        // This prevents data loss during CrashLoopBackoff scenarios
         let mut cleaned_files = 0;
         if files_copied > 0 && errors == 0 {
-            info!("Restoration successful, cleaning up backup directory: {}", backup_path.display());
+            info!("All {} files successfully copied - proceeding with atomic backup cleanup", files_copied);
             match std::fs::remove_dir_all(backup_path) {
                 Ok(()) => {
                     cleaned_files = files_copied;
@@ -182,9 +183,12 @@ impl DirectRestoreEngine {
                 }
                 Err(e) => {
                     warn!("Failed to clean up backup directory: {}", e);
-                    // Don't fail the operation for cleanup issues
+                    // Don't fail the operation - files are already restored successfully
+                    info!("Restoration was successful despite cleanup failure");
                 }
             }
+        } else if errors > 0 {
+            warn!("Keeping backup files due to {} copy errors - manual cleanup may be needed", errors);
         }
         
         let result = DirectRestoreResult {
@@ -281,14 +285,16 @@ impl DirectRestoreEngine {
                 result.cleaned_files = transferred_count;
                 info!("Bulk transfer completed successfully: {} files", transferred_count);
                 
-                // Clean up backup directory after successful transfer
+                // CRITICAL SAFETY: Only cleanup backup after ALL files successfully transferred
+                info!("All {} files successfully transferred - proceeding with atomic backup cleanup", transferred_count);
                 match fs::remove_dir_all(backup_path) {
                     Ok(()) => {
                         info!("Successfully cleaned up backup directory: {}", backup_path.display());
                     }
                     Err(e) => {
                         warn!("Failed to clean up backup directory: {}", e);
-                        // Don't fail the operation for cleanup issues
+                        // Don't fail the operation - files are already restored successfully
+                        info!("Transfer was successful despite cleanup failure");
                     }
                 }
             }
@@ -855,68 +861,29 @@ impl DirectRestoreEngine {
 
         debug!("Processing file: {} -> {}", backup_file_path.display(), target_path.display());
 
-        // Try move first (most efficient), then fallback to copy
-        let move_result = self.move_file_with_retry(backup_file_path, &target_path);
+        // SAFETY: Always use copy-only operations to prevent data loss during crashes  
+        // Individual file cleanup is disabled - only bulk cleanup after full success
+        let copy_result = self.copy_file_with_retry(backup_file_path, &target_path);
         
-        match move_result {
+        match copy_result {
             CopyResult::Success => {
-                info!("Successfully moved: {}", target_path.display());
+                info!("Successfully copied: {}", target_path.display());
                 
-                // Validate that the moved file is accessible
+                // Validate that the copied file is accessible
                 if let Err(e) = self.validate_restored_file(&target_path) {
-                    warn!("Moved file validation failed for {}: {}", target_path.display(), e);
+                    warn!("Copied file validation failed for {}: {}", target_path.display(), e);
                 }
                 
-                // File is automatically cleaned by move operation
-                Ok(FileProcessOutcome::Cleaned)
+                // NO individual cleanup - backup files preserved until all files done
+                Ok(FileProcessOutcome::Success)
             }
             CopyResult::Skipped(reason) => {
-                info!("Skipped file move: {} - {}", target_path.display(), reason);
+                info!("Skipped file copy: {} - {}", target_path.display(), reason);
                 Ok(FileProcessOutcome::Skipped(reason))
             }
             CopyResult::Failed(error) => {
-                debug!("Move failed, falling back to copy: {} - {}", target_path.display(), error);
-                
-                // Fall back to copy+delete
-                let copy_result = self.copy_file_with_retry(backup_file_path, &target_path);
-                match copy_result {
-                    CopyResult::Success => {
-                        info!("Successfully copied (fallback): {}", target_path.display());
-                        
-                        if let Err(e) = self.validate_restored_file(&target_path) {
-                            warn!("Copied file validation failed for {}: {}", target_path.display(), e);
-                        }
-                        
-                        // Clean up backup file after successful copy
-                        if !self.dry_run {
-                            match self.validate_file_before_cleanup(backup_file_path, &target_path) {
-                                Ok(()) => {
-                                    match self.cleanup_backup_file(backup_file_path) {
-                                        Ok(()) => Ok(FileProcessOutcome::Cleaned),
-                                        Err(e) => {
-                                            warn!("Cleanup failed for {}: {}", backup_file_path.display(), e);
-                                            Ok(FileProcessOutcome::Success)
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("File validation failed before cleanup for {}: {}", backup_file_path.display(), e);
-                                    Ok(FileProcessOutcome::Success)
-                                }
-                            }
-                        } else {
-                            Ok(FileProcessOutcome::Success)
-                        }
-                    }
-                    CopyResult::Skipped(reason) => {
-                        info!("Skipped file copy: {} - {}", target_path.display(), reason);
-                        Ok(FileProcessOutcome::Skipped(reason))
-                    }
-                    CopyResult::Failed(error) => {
-                        error!("Failed to restore file: {} - {}", target_path.display(), error);
-                        Ok(FileProcessOutcome::Failed(error))
-                    }
-                }
+                error!("Failed to copy file: {} - {}", target_path.display(), error);
+                Ok(FileProcessOutcome::Failed(error))
             }
         }
     }
