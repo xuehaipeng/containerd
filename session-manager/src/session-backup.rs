@@ -111,7 +111,7 @@ fn main() -> Result<()> {
     init_file_logging("session-backup")?;
     let args = Args::parse();
 
-    info!("=== Session Backup Tool Started (Lockless) ===");
+    info!("=== Session Backup Tool Started ===");
     info!("Version: {}", get_version());
     info!("Mappings file: {}", args.mappings_file.display());
     info!("Sessions path: {}", args.sessions_path.display());
@@ -249,7 +249,7 @@ fn perform_backup_operation(
     let backup_start_time = Instant::now();
     info!("Performing lockless backup: {} -> {}", source_dir.display(), backup_dir.display());
 
-    // Create backup directory (lockless)
+    // Create backup directory
     create_directory_simple(backup_dir)
         .with_context(|| format!("Failed to create backup directory: {}", backup_dir.display()))?;
 

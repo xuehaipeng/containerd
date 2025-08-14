@@ -41,7 +41,7 @@ impl LocklessBackupManager {
 
     /// Create directory without any locking - safe for single-process operations
     pub fn create_directory_lockless(&self, path: &Path) -> Result<()> {
-        debug!("Creating directory (lockless): {}", path.display());
+        debug!("Creating directory: {}", path.display());
 
         // Check if we should write operation metadata
         let metadata_file = path.with_extension("backup_meta");
@@ -53,7 +53,7 @@ impl LocklessBackupManager {
         if !path.exists() {
             fs::create_dir_all(path)
                 .with_context(|| format!("Failed to create directory: {}", path.display()))?;
-            info!("Created directory (lockless): {}", path.display());
+            info!("Created directory: {}", path.display());
         } else {
             debug!("Directory already exists: {}", path.display());
         }
