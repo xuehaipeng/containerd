@@ -680,13 +680,7 @@ fn stream_copy_tasks_recursive(
             // Recursively stream tasks from subdirectory
             stream_copy_tasks_recursive(&src_path, &dst_path, src_root, sender, root_dev, task_count, stats)?;
         } else if metadata.is_file() || metadata.file_type().is_symlink() {
-            // Check if the SOURCE file path is on a mounted filesystem (skip source-mounted files)
-            if is_file_mounted(&src_path) {
-                debug!("Skipping mounted file: {} -> {}", src_path.display(), dst_path.display());
-                stats.add_skipped(); // Count mounted files as skipped
-                continue;
-            }
-            
+            // Do not perform per-file mount checks; directory-level device checks already avoid crossing mount boundaries.
             // Create relative path for logging
             let relative_path = src_path.strip_prefix(src_root)
                 .unwrap_or(&src_path)
