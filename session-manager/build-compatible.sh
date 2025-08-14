@@ -69,7 +69,7 @@ else
     echo "Building with glibc compatibility optimizations using $NPROC parallel jobs..."
     
     # Build for native target with optimizations
-    cargo build --release --jobs $NPROC
+    cargo build --release --jobs $NPROC --target x86_64-unknown-linux-gnu
     
     # Copy glibc binaries
     echo "Copying optimized glibc binaries..."
