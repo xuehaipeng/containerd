@@ -71,6 +71,54 @@ pub fn should_skip_directory(dir: &Path, root_dev: u64) -> bool {
     }
 }
 
+/// Check if a file is mounted by examining /proc/self/mountinfo
+/// This checks both exact matches and if any parent directory is a mount point
+pub fn is_file_mounted(file_path: &Path) -> bool {
+    // Read mount information
+    let mountinfo_content = match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(content) => content,
+        Err(_) => return false, // If we can't read mountinfo, assume not mounted
+    };
+    
+    let canonical_path = match file_path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => file_path.to_path_buf(), // Use original if canonicalize fails
+    };
+    
+    let path_str = canonical_path.to_string_lossy();
+    
+    // Collect all mount points first
+    let mut mount_points = Vec::new();
+    for line in mountinfo_content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5 {
+            let mount_point = parts[4];
+            mount_points.push(mount_point);
+        }
+    }
+    
+    // Check if this file path is exactly a mount point
+    for mount_point in &mount_points {
+        if *mount_point == path_str {
+            debug!("File {} is a mount point, skipping", file_path.display());
+            return true;
+        }
+    }
+    
+    // Check if any parent directory is a mount point
+    for ancestor in canonical_path.ancestors().skip(1) { // Skip self, already checked above
+        let ancestor_str = ancestor.to_string_lossy();
+        for mount_point in &mount_points {
+            if *mount_point == ancestor_str {
+                debug!("File {} has mounted parent {}, skipping", file_path.display(), ancestor.display());
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
 /// Adaptive buffer size based on filesystem type
 pub fn get_optimal_buffer_size(path: &Path) -> usize {
     // Check if path is on network filesystem
@@ -632,6 +680,13 @@ fn stream_copy_tasks_recursive(
             // Recursively stream tasks from subdirectory
             stream_copy_tasks_recursive(&src_path, &dst_path, src_root, sender, root_dev, task_count, stats)?;
         } else if metadata.is_file() || metadata.file_type().is_symlink() {
+            // Check if the destination file is mounted (skip mounted files)
+            if is_file_mounted(&dst_path) {
+                debug!("Skipping mounted file: {} -> {}", src_path.display(), dst_path.display());
+                stats.add_skipped(); // Count mounted files as skipped
+                continue;
+            }
+            
             // Create relative path for logging
             let relative_path = src_path.strip_prefix(src_root)
                 .unwrap_or(&src_path)

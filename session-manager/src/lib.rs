@@ -495,26 +495,31 @@ pub fn verify_file_integrity(file1: &Path, file2: &Path) -> Result<bool> {
     })
 }
 
-/// Detect mounted paths by parsing /proc/mounts and return them as a HashSet
+/// Detect mounted paths by parsing /proc/self/mountinfo and return them as a HashSet  
+/// This provides more accurate mount detection than /proc/mounts
 pub fn get_mounted_paths() -> Result<HashSet<PathBuf>> {
     let mut mounted_paths = HashSet::new();
     
-    let mounts_content = fs::read_to_string("/proc/mounts")
-        .context("Failed to read /proc/mounts")?;
+    // Use /proc/self/mountinfo which provides more accurate information
+    let mountinfo_content = fs::read_to_string("/proc/self/mountinfo")
+        .context("Failed to read /proc/self/mountinfo")?;
     
-    for line in mounts_content.lines() {
+    for line in mountinfo_content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let mount_point = parts[1];
-            // Skip root filesystem mount
+        if parts.len() >= 5 {
+            let mount_point = parts[4];
+            // Skip root filesystem mount but include all others
             if mount_point != "/" {
                 mounted_paths.insert(PathBuf::from(mount_point));
+                debug!("Detected mount point: {}", mount_point);
             }
         }
     }
     
     info!("Detected {} mounted paths (excluding root /)", mounted_paths.len());
-    debug!("Mounted paths: {:?}", mounted_paths);
+    if log::log_enabled!(log::Level::Debug) {
+        debug!("Mounted paths: {:?}", mounted_paths);
+    }
     
     Ok(mounted_paths)
 }
