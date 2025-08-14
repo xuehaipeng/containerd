@@ -680,8 +680,8 @@ fn stream_copy_tasks_recursive(
             // Recursively stream tasks from subdirectory
             stream_copy_tasks_recursive(&src_path, &dst_path, src_root, sender, root_dev, task_count, stats)?;
         } else if metadata.is_file() || metadata.file_type().is_symlink() {
-            // Check if the destination file is mounted (skip mounted files)
-            if is_file_mounted(&dst_path) {
+            // Check if the SOURCE file path is on a mounted filesystem (skip source-mounted files)
+            if is_file_mounted(&src_path) {
                 debug!("Skipping mounted file: {} -> {}", src_path.display(), dst_path.display());
                 stats.add_skipped(); // Count mounted files as skipped
                 continue;
