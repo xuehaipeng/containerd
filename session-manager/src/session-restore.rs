@@ -175,7 +175,10 @@ async fn main() -> Result<()> {
     }
 
     // Perform direct container root restoration
-    info!("Starting optimized direct container root restoration from {}...", args.backup_path.display());
+    // Prefer buffered copy for overlayfs: set env hint to tune fast_copy
+   std::env::set_var("SESSION_MANAGER_FORCE_OVERLAY", "true");
+
+   info!("Starting optimized direct container root restoration from {}...", args.backup_path.display());
 
     let result = if args.async_mode {
         // Use async operations for better performance

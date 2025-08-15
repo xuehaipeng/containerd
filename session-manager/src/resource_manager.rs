@@ -13,8 +13,15 @@ impl ThreadPoolManager {
             .unwrap_or(4);
         
         // I/O pool: More threads for I/O bound operations
+        // Allow override via env SESSION_MANAGER_IO_THREADS
+        let io_threads = std::env::var("SESSION_MANAGER_IO_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(num_cpus * 2);
+
         let io_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus * 2)
+            .num_threads(io_threads)
             .thread_name(|index| format!("io-worker-{}", index))
             .build()
             .context("Failed to create I/O thread pool")?;

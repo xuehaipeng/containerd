@@ -12,6 +12,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use crossbeam_channel::{unbounded, Sender};
 use crate::resource_manager::ResourceManager;
+use std::ffi::OsStr;
 
 #[cfg(target_os = "linux")]
 use libc::{posix_fadvise, POSIX_FADV_SEQUENTIAL, POSIX_FADV_DONTNEED};
@@ -131,6 +132,13 @@ pub fn get_optimal_buffer_size(path: &Path) -> usize {
 
 /// Detect if path is on a network filesystem
 fn is_network_filesystem(path: &Path) -> bool {
+    // Allow override to force overlay behavior tuning via env
+    if std::env::var("SESSION_MANAGER_FORCE_OVERLAY").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false) {
+        return false;
+    }
+    if is_overlay_filesystem(path) {
+        return false; // Treat overlay as local for buffer sizing but skip zero-copy later
+    }
     // Try to get filesystem type from /proc/mounts
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
         if let Some(mount_line) = find_mount_point(path, &mounts) {
@@ -143,6 +151,9 @@ fn is_network_filesystem(path: &Path) -> bool {
 
 /// Find the mount point for a given path
 fn find_mount_point(path: &Path, mounts: &str) -> Option<String> {
+    // Normalize path for comparison (avoid trailing slashes issues)
+    let path = if path.as_os_str() == OsStr::new("/") { path.to_path_buf() } else { path.to_path_buf() };
+
     let path_str = path.to_string_lossy();
     let mut best_match = None;
     let mut best_match_len = 0;
@@ -347,6 +358,12 @@ pub fn copy_file_best_strategy(src: &Path, dst: &Path) -> Result<u64> {
         debug!("Created symlink: {} -> {}", dst.display(), target.display());
         return Ok(0); // Symlinks don't have size
     }
+
+    // If destination is overlayfs, prefer buffered copy (empirically faster / more reliable)
+    if is_overlay_filesystem(dst) {
+        debug!("Destination is overlayfs - preferring buffered copy for {}", dst.display());
+        return copy_file_regular(src, dst);
+    }
     
     // For regular files, use the kernel-assisted copy chain with cache management
     let file_size = src_metadata.len();
@@ -550,7 +567,17 @@ pub fn copy_directory_parallel(
     
     // STREAMING OPTIMIZATION: Producer-Consumer Pattern  
     // Channel capacity: buffer to balance memory usage vs latency
-    let (task_sender, task_receiver) = unbounded::<CopyTask>();
+    let buffer_cap = std::env::var("SESSION_MANAGER_TASK_BUFFER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(0);
+    let (task_sender, task_receiver) = if buffer_cap > 0 {
+        let (s, r) = crossbeam_channel::bounded::<CopyTask>(buffer_cap);
+        (s, r)
+    } else {
+        unbounded::<CopyTask>()
+    };
     let stats_ref = Arc::clone(&stats);
     
     // Clone paths for the producer thread

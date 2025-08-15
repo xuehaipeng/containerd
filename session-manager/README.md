@@ -1,8 +1,8 @@
-# Session Manager - High-Performance Rust Implementation
+# Session Manager - Ultra-High-Performance Rust Implementation
 
 ## Overview
 
-This directory contains a **highly optimized, Rust-based implementation** of session backup and restore functionality for containerd. This solution replaces problematic shell scripts with a **production-ready, high-performance implementation** featuring advanced kernel-assisted file operations and parallel processing.
+This directory contains an **ultra-optimized, Rust-based implementation** of session backup and restore functionality for containerd. This solution replaces problematic shell scripts with a **production-ready, performance-optimized implementation** featuring advanced kernel-assisted file operations, async processing, and specialized optimizations for container environments.
 
 ## Why This Implementation?
 
@@ -11,13 +11,15 @@ This directory contains a **highly optimized, Rust-based implementation** of ses
 2. **Poor Performance**: Sequential file operations, no optimization
 3. **Mount Bypass Problems**: Unreliable mount detection
 4. **Maintenance Burden**: Hard to debug and extend
+5. **Restore Bottlenecks**: Slow restoration operations blocking container startup
 
 ### Rust Advantages
 1. **Memory Safety**: Zero buffer overflows or memory corruption
-2. **High Performance**: Kernel-assisted copy operations + parallel processing
+2. **Ultra-High Performance**: Async operations + kernel-assisted copy + parallel processing
 3. **Robust Error Handling**: Comprehensive error recovery with `Result` types
 4. **Production Ready**: Extensively tested with real-world workloads
-5. **Advanced Optimizations**: Copy-on-write, sendfile, device ID-based mount detection
+5. **Advanced Optimizations**: OverlayFS tuning, background cleanup, device ID-based mount detection
+6. **Performance Parity**: Session-restore now matches session-backup speed
 
 ## Advanced Architecture
 

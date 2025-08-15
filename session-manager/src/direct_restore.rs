@@ -8,6 +8,28 @@ use std::time::{Duration, SystemTime};
 use std::thread;
 use rayon::prelude::*;
 use crate::resource_manager::ResourceManager;
+use std::thread::JoinHandle;
+
+// Background cleanup: rename-then-delete to avoid blocking the fast path
+fn background_cleanup_dir(path: &Path) -> Result<()> {
+    use std::time::SystemTime;
+    if !path.exists() {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("No parent for cleanup path"))?;
+    let ts = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let tmp_name = format!("{}.cleanup_{}", path.file_name().unwrap_or_default().to_string_lossy(), ts);
+    let renamed = parent.join(tmp_name);
+    fs::rename(path, &renamed).with_context(|| format!("Failed to rename {} to {}", path.display(), renamed.display()))?;
+    thread::spawn(move || {
+        info!("Starting background removal of {}", renamed.display());
+        match fs::remove_dir_all(&renamed) {
+            Ok(()) => info!("Background removal completed: {}", renamed.display()),
+            Err(e) => warn!("Background removal failed for {}: {}", renamed.display(), e),
+        }
+    });
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DirectRestoreResult {
@@ -230,6 +252,15 @@ impl DirectRestoreEngine {
             cleaned_details: Vec::new(),
             duration: start_time.elapsed().unwrap_or(Duration::from_secs(0)),
         };
+
+        // Optionally perform background cleanup of backup directory to avoid blocking restore completion
+        if cleaned_files == 0 && errors == 0 && files_copied > 0 {
+            if std::env::var("SESSION_MANAGER_BG_CLEANUP").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(true) {
+                if let Err(e) = background_cleanup_dir(backup_path) {
+                    warn!("Background cleanup setup failed: {}", e);
+                }
+            }
+        }
         
         info!("Async restoration completed:");
         info!("  Total files: {}", restore_result.total_files);
@@ -278,6 +309,15 @@ impl DirectRestoreEngine {
             cleaned_details: Vec::new(),
             duration: start_time.elapsed().unwrap_or(Duration::from_secs(0)),
         };
+
+        // Optionally perform background cleanup of backup directory to avoid blocking restore completion
+        if cleaned_files == 0 && errors == 0 && files_copied > 0 {
+            if std::env::var("SESSION_MANAGER_BG_CLEANUP").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(true) {
+                if let Err(e) = background_cleanup_dir(backup_path) {
+                    warn!("Background cleanup setup failed: {}", e);
+                }
+            }
+        }
         
         info!("Optimized restoration completed:");
         info!("  Total files: {}", result.total_files);
@@ -349,16 +389,23 @@ impl DirectRestoreEngine {
         // This prevents data loss during CrashLoopBackoff scenarios
         let mut cleaned_files = 0;
         if files_copied > 0 && errors == 0 {
-            info!("All {} files successfully copied - proceeding with atomic backup cleanup", files_copied);
-            match std::fs::remove_dir_all(backup_path) {
-                Ok(()) => {
-                    cleaned_files = files_copied;
-                    info!("Successfully cleaned up backup directory with {} files", cleaned_files);
+            info!("All {} files successfully copied - scheduling background backup cleanup", files_copied);
+            // Defer cleanup to background to avoid blocking completion
+            if std::env::var("SESSION_MANAGER_BG_CLEANUP").map(|v| v == "0" || v.to_lowercase() == "false").unwrap_or(false) {
+                // Explicitly disabled background cleanup: perform inline (may block)
+                match std::fs::remove_dir_all(backup_path) {
+                    Ok(()) => {
+                        cleaned_files = files_copied;
+                        info!("Successfully cleaned up backup directory with {} files", cleaned_files);
+                    }
+                    Err(e) => {
+                        warn!("Failed to clean up backup directory: {}", e);
+                        info!("Restoration was successful despite cleanup failure");
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to clean up backup directory: {}", e);
-                    // Don't fail the operation - files are already restored successfully
-                    info!("Restoration was successful despite cleanup failure");
+            } else {
+                if let Err(e) = background_cleanup_dir(backup_path) {
+                    warn!("Failed to schedule background cleanup: {}", e);
                 }
             }
         } else if errors > 0 {
