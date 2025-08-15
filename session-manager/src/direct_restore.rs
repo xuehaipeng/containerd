@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 use std::thread;
 use rayon::prelude::*;
 use crate::resource_manager::ResourceManager;
-use std::thread::JoinHandle;
 
 // Background cleanup: rename-then-delete to avoid blocking the fast path
 fn background_cleanup_dir(path: &Path) -> Result<()> {

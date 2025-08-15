@@ -130,6 +130,18 @@ pub fn get_optimal_buffer_size(path: &Path) -> usize {
     }
 }
 
+/// Detect if path is on an overlay filesystem
+fn is_overlay_filesystem(path: &Path) -> bool {
+    // Try to get filesystem type from /proc/mounts
+    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+        if let Some(mount_line) = find_mount_point(path, &mounts) {
+            let fs_type = mount_line.split_whitespace().nth(2).unwrap_or("");
+            return fs_type == "overlay";
+        }
+    }
+    false
+}
+
 /// Detect if path is on a network filesystem
 fn is_network_filesystem(path: &Path) -> bool {
     // Allow override to force overlay behavior tuning via env
