@@ -100,6 +100,8 @@ pub struct DirectRestoreEngine {
     pub timeout: u64,
     pub max_retries: u32,
     pub retry_delay: Duration,
+    pub fast_mode: bool,
+    pub async_mode: bool,
 }
 
 #[allow(dead_code)]
@@ -110,6 +112,8 @@ impl DirectRestoreEngine {
             timeout,
             max_retries: 3,
             retry_delay: Duration::from_millis(500),
+            fast_mode: false,
+            async_mode: false,
         }
     }
 
@@ -117,6 +121,171 @@ impl DirectRestoreEngine {
         self.max_retries = max_retries;
         self.retry_delay = retry_delay;
         self
+    }
+
+    pub fn with_fast_mode(mut self, fast_mode: bool) -> Self {
+        self.fast_mode = fast_mode;
+        self
+    }
+
+    pub fn with_async_mode(mut self, async_mode: bool) -> Self {
+        self.async_mode = async_mode;
+        self
+    }
+
+    /// Async restore files directly to container root filesystem with optimized performance
+    pub async fn restore_to_container_root_async(&self, backup_path: &Path) -> Result<DirectRestoreResult> {
+        let start_time = SystemTime::now();
+        
+        info!("Starting high-performance async direct container root restoration from: {}", backup_path.display());
+        info!("Dry run mode: {}", self.dry_run);
+        info!("Fast mode: {}", self.fast_mode);
+        
+        let mut result = DirectRestoreResult {
+            total_files: 0,
+            successful_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            cleaned_files: 0,
+            skipped_details: Vec::new(),
+            failed_details: Vec::new(),
+            cleaned_details: Vec::new(),
+            duration: Duration::from_secs(0),
+        };
+
+        if !backup_path.exists() {
+            warn!("Backup path does not exist: {}", backup_path.display());
+            result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
+            return Ok(result);
+        }
+
+        // ASYNC OPTIMIZATION: Use async fast_copy with immediate cleanup
+        if !self.dry_run {
+            info!("Using async fast_copy engine for maximum performance");
+            return self.restore_with_async_fast_copy_engine(backup_path, start_time).await;
+        }
+
+        // Keep existing dry-run logic
+        result.total_files = self.count_files_recursive(backup_path)?;
+        info!("ASYNC DRY RUN: Would restore {} files to container root", result.total_files);
+        result.successful_files = result.total_files;
+        result.duration = start_time.elapsed().unwrap_or(Duration::from_secs(0));
+        
+        Ok(result)
+    }
+
+    /// High-performance async restoration using streaming operations
+    async fn restore_with_async_fast_copy_engine(&self, backup_path: &Path, start_time: SystemTime) -> Result<DirectRestoreResult> {
+        info!("Starting async streaming restoration");
+        
+        // Use async file operations for better performance
+        let result = tokio::task::spawn_blocking({
+            let backup_path = backup_path.to_path_buf();
+            let fast_mode = self.fast_mode;
+            move || {
+                use crate::fast_copy;
+                
+                if fast_mode {
+                    info!("Async fast mode - minimal overhead restoration");
+                }
+                
+                // Use optimized parallel copy engine to restore directly to container root
+                let stats = fast_copy::copy_directory_parallel(&backup_path, &PathBuf::from("/"), None)
+                    .with_context(|| format!("Async fast copy restoration failed from {}", backup_path.display()))?;
+                
+                let (files_copied, bytes_copied, errors, skipped) = stats.get_summary();
+                
+                // Async cleanup for better performance
+                let mut cleaned_files = 0;
+                if files_copied > 0 && errors == 0 {
+                    info!("All {} files successfully copied - proceeding with async cleanup", files_copied);
+                    match std::fs::remove_dir_all(&backup_path) {
+                        Ok(()) => {
+                            cleaned_files = files_copied;
+                            info!("Successfully cleaned up backup directory with {} files", cleaned_files);
+                        }
+                        Err(e) => {
+                            warn!("Failed to clean up backup directory: {}", e);
+                        }
+                    }
+                } else if errors > 0 {
+                    warn!("Keeping backup files due to {} copy errors", errors);
+                }
+                
+                Ok::<_, anyhow::Error>((files_copied, bytes_copied, errors, skipped, cleaned_files))
+            }
+        }).await
+        .map_err(|e| anyhow::anyhow!("Async restoration task failed: {:?}", e))??;
+        
+        let (files_copied, bytes_copied, errors, skipped, cleaned_files) = result;
+        
+        let restore_result = DirectRestoreResult {
+            total_files: files_copied + errors + skipped,
+            successful_files: files_copied,
+            skipped_files: skipped,
+            failed_files: errors,
+            cleaned_files,
+            skipped_details: Vec::new(),
+            failed_details: Vec::new(),
+            cleaned_details: Vec::new(),
+            duration: start_time.elapsed().unwrap_or(Duration::from_secs(0)),
+        };
+        
+        info!("Async restoration completed:");
+        info!("  Total files: {}", restore_result.total_files);
+        info!("  Successful: {}", restore_result.successful_files);
+        info!("  Bytes copied: {}", bytes_copied);
+        info!("  Duration: {:?}", restore_result.duration);
+        
+        Ok(restore_result)
+    }
+
+    /// Optimized restoration with reduced validation overhead
+    fn restore_with_fast_copy_engine_optimized(&self, backup_path: &Path, start_time: SystemTime) -> Result<DirectRestoreResult> {
+        use crate::fast_copy;
+        
+        info!("Starting optimized fast_copy restoration with minimal validation");
+        
+        // Use our optimized parallel copy engine - skip most validation in fast mode
+        let stats = fast_copy::copy_directory_parallel(backup_path, &PathBuf::from("/"), None)
+            .with_context(|| format!("Fast copy restoration failed from {}", backup_path.display()))?;
+        
+        let (files_copied, bytes_copied, errors, skipped) = stats.get_summary();
+        
+        // Immediate cleanup in fast mode - minimal safety checks
+        let mut cleaned_files = 0;
+        if files_copied > 0 {
+            info!("Fast mode: {} files copied - proceeding with immediate cleanup", files_copied);
+            match std::fs::remove_dir_all(backup_path) {
+                Ok(()) => {
+                    cleaned_files = files_copied;
+                    info!("Fast cleanup completed: {} files removed from backup", cleaned_files);
+                }
+                Err(e) => {
+                    warn!("Fast cleanup failed: {}", e);
+                }
+            }
+        }
+        
+        let result = DirectRestoreResult {
+            total_files: files_copied + errors + skipped,
+            successful_files: files_copied,
+            skipped_files: skipped,
+            failed_files: errors,
+            cleaned_files,
+            skipped_details: Vec::new(),
+            failed_details: Vec::new(),
+            cleaned_details: Vec::new(),
+            duration: start_time.elapsed().unwrap_or(Duration::from_secs(0)),
+        };
+        
+        info!("Optimized restoration completed:");
+        info!("  Total files: {}", result.total_files);
+        info!("  Successful: {}", result.successful_files);
+        info!("  Duration: {:?}", result.duration);
+        info!("  Throughput: {:.2} MB/s", bytes_copied as f64 / 1024.0 / 1024.0 / result.duration.as_secs_f64());
+        
+        Ok(result)
     }
 
     /// Restore files directly to container root filesystem with parallel processing
@@ -147,7 +316,12 @@ impl DirectRestoreEngine {
         // NEW: Use our proven fast_copy engine for high performance
         if !self.dry_run {
             info!("Using fast_copy engine for optimized restoration");
-            return self.restore_with_fast_copy_engine(backup_path, start_time);
+            if self.fast_mode {
+                info!("Fast mode enabled - skipping extensive validation");
+                return self.restore_with_fast_copy_engine_optimized(backup_path, start_time);
+            } else {
+                return self.restore_with_fast_copy_engine(backup_path, start_time);
+            }
         }
 
         // Keep existing dry-run logic

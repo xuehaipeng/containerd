@@ -60,6 +60,12 @@ struct Args {
 
     #[arg(long, help = "Dry run mode - don't actually copy files")]
     dry_run: bool,
+
+    #[arg(long, help = "Fast mode - reduced validation for better performance")]
+    fast_mode: bool,
+
+    #[arg(long, help = "Use async operations for improved performance")]
+    async_mode: bool,
 }
 
 fn init_file_logging(binary_name: &str) -> Result<()> {
@@ -89,7 +95,8 @@ fn init_file_logging(binary_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Record start time for total execution timing
     let start_time = Instant::now();
     
@@ -102,6 +109,8 @@ fn main() -> Result<()> {
     info!("Backup path: {}", args.backup_path.display());
     info!("Timeout: {} seconds", args.timeout);
     info!("Dry run: {}", args.dry_run);
+    info!("Fast mode: {}", args.fast_mode);
+    info!("Async mode: {}", args.async_mode);
     info!("Using COPY-ONLY mode for crash safety - cleanup happens after full success");
 
     // Get current pod information
@@ -151,14 +160,31 @@ fn main() -> Result<()> {
     debug!("Backup storage directory contents before restore:");
     show_directory_contents(&args.backup_path)?;
 
-    // Create direct restore engine
-    let restore_engine = DirectRestoreEngine::new(args.dry_run, args.timeout);
+    // Create direct restore engine with performance optimizations
+    let mut restore_engine = DirectRestoreEngine::new(args.dry_run, args.timeout);
+    
+    // Apply performance optimizations
+    if args.fast_mode {
+        restore_engine = restore_engine.with_fast_mode(true);
+        info!("Fast mode enabled - reduced validation overhead");
+    }
+    
+    if args.async_mode {
+        restore_engine = restore_engine.with_async_mode(true);
+        info!("Async mode enabled - using async I/O operations");
+    }
 
     // Perform direct container root restoration
-    info!("Starting direct container root restoration from {}...", args.backup_path.display());
+    info!("Starting optimized direct container root restoration from {}...", args.backup_path.display());
 
-    let result = restore_engine.restore_to_container_root(&args.backup_path)
-        .with_context(|| "Failed to perform direct container root restoration")?;
+    let result = if args.async_mode {
+        // Use async operations for better performance
+        restore_engine.restore_to_container_root_async(&args.backup_path).await
+            .with_context(|| "Failed to perform async direct container root restoration")?
+    } else {
+        restore_engine.restore_to_container_root(&args.backup_path)
+            .with_context(|| "Failed to perform direct container root restoration")?
+    };
 
     // Report results
     info!("=== Direct Container Root Restoration Results ===");
